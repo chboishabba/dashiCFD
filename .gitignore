@@ -1,3 +1,4 @@
 dashiCORE/
 __pycache__/
 *.npz
+venv/

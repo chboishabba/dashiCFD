@@ -66,6 +66,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dtype", type=str, choices=["auto", "float32", "float64"], default="auto", help="LES dtype (default auto: float64 when N>1024 else float32)")
     p.add_argument("--backend", type=str, choices=["cpu", "accelerated", "vulkan"], default="cpu", help="dashiCORE backend for ternary ops (if available)")
     p.add_argument("--fft-backend", type=str, choices=["numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"], default="numpy", help="FFT backend (vkFFT routes FFTs to GPU when available)")
+    p.add_argument("--A-npz", type=Path, default=None, dest="A_npz", help="npz containing learned operator under key 'A' (required for --kernel-only)")
+    p.add_argument("--no-decode", action="store_true", help="skip decoding/plotting (throughput mode)")
+    p.add_argument("--hash-every", type=int, default=0, dest="hash_every", help="hash proxy state every K steps (0=off)")
+    p.add_argument("--log-metrics", type=Path, default=None, dest="log_metrics", help="optional JSON file to record timing/hashes")
     return p.parse_args()
 
 
@@ -161,6 +165,8 @@ def main():
     if args.kernel_only:
         if args.z0_npz is None:
             raise SystemExit("--kernel-only requires --z0-npz (z, mask_low, anchor_idx)")
+        if args.A_npz is None:
+            raise SystemExit("--kernel-only requires --A-npz containing key 'A'")
         data = np.load(args.z0_npz)
         for key in ("z", "mask_low", "anchor_idx"):
             if key not in data:
@@ -168,13 +174,20 @@ def main():
         z0 = data["z"]
         mask_low0 = data["mask_low"].astype(bool)
         anchor_idx = data["anchor_idx"].astype(np.int64)
+        # metadata fallbacks from z0 file if present
+        if "N" in data:
+            args.N = int(data["N"][()])
         grid = make_grid(args.N)
-        Z = np.stack([z0])  # only needed to align shapes
+        Z = np.stack([z0])
         traj_stream = []
         traj_save = None
         omega_snap = {}
         args.steps = max(args.steps, 1)
         snap_ts = list(range(args.stride, args.steps + 1, args.stride))
+        A_data = np.load(args.A_npz)
+        if "A" not in A_data:
+            raise SystemExit("--A-npz must contain key 'A'")
+        A = A_data["A"]
     elif args.traj_npz is not None:
         data = np.load(args.traj_npz)
         if "traj" not in data:
@@ -196,15 +209,15 @@ def main():
         omega_snap = {}
 
     # Encode trajectory
-    mask_low0 = None
-    anchor_idx = None
-    Z = []
     import time
     t_enc_start = time.perf_counter()
     if args.kernel_only:
-        # Z already seeded with z0; ensure shape consistency
+        Z = np.stack([z0])
         t_enc = 0.0
     else:
+        Z = []
+        mask_low0 = None
+        anchor_idx = None
         for t, omega in traj_stream:
             if (not args.no_ground_truth) and (t in snap_ts):
                 omega_snap[t] = omega.copy()
@@ -226,12 +239,20 @@ def main():
                 print(f"[save] wrote trajectory to {args.save_traj}")
 
     # Learn linear operator and rollout
-    t_learn_start = time.perf_counter()
-    A = learn_linear_operator(Z, ridge=args.ridge)
-    t_learn = time.perf_counter() - t_learn_start
+    if args.kernel_only:
+        t_learn = 0.0
+    else:
+        t_learn_start = time.perf_counter()
+        A = learn_linear_operator(Z, ridge=args.ridge)
+        t_learn = time.perf_counter() - t_learn_start
 
     t_roll_start = time.perf_counter()
-    Zhat = Z[0:2].copy()  # keep two slots for rolling state
+    Z_arr = np.asarray(Z)
+    D = Z_arr.shape[1]
+    Zhat = np.zeros((2, D), dtype=Z_arr.dtype)
+    Zhat[0] = Z_arr[0]
+    import hashlib
+    hashes = []
     Zhat_snap = {}
     for t in range(args.steps):
         Zhat[1] = Zhat[0] @ A
@@ -239,6 +260,9 @@ def main():
             print(f"[rollout] t={t+1}/{args.steps}")
         if (t + 1) in snap_ts:
             Zhat_snap[t + 1] = Zhat[1].copy()
+        if args.hash_every and ((t + 1) % args.hash_every == 0):
+            h = hashlib.blake2b(Zhat[1].astype(np.float64).tobytes(), digest_size=16).hexdigest()
+            hashes.append({"t": t + 1, "hash": h})
         Zhat[0], Zhat[1] = Zhat[1], Zhat[0]
     t_roll = time.perf_counter() - t_roll_start
 
@@ -258,59 +282,84 @@ def main():
         else:
             plt.ion()
 
-    for t in snap_ts:
-        t_dec_start = time.perf_counter()
-        z_curr = Zhat_snap.get(t, Zhat[0])
-        rng = np.random.default_rng(args.residual_seed + 1000003 * t)
-        omega_hat, _, _, _ = decode_with_residual(z_curr, grid, cfg, mask_low0, anchor_idx, rng, atoms=None)
-        t_decode_total += time.perf_counter() - t_dec_start
+    if (not args.no_decode) and len(snap_ts) > 0:
+        for t in snap_ts:
+            t_dec_start = time.perf_counter()
+            z_curr = Zhat_snap.get(t, Zhat[0])
+            rng = np.random.default_rng(args.residual_seed + 1000003 * t)
+            omega_hat, _, _, _ = decode_with_residual(z_curr, grid, cfg, mask_low0, anchor_idx, rng, atoms=None)
+            t_decode_total += time.perf_counter() - t_dec_start
 
-        # Resolve figure size
-        if args.pix_width is not None or args.pix_height is not None:
-            dpi = args.dpi
-            w_in = (args.pix_width or int(args.figsize.split(",")[0])) / dpi
-            h_in = (args.pix_height or int(args.figsize.split(",")[1])) / dpi
-            figsize = (w_in, h_in)
-        else:
-            w_str, h_str = args.figsize.split(",")
-            figsize = (float(w_str), float(h_str))
-            dpi = args.dpi
+            # Resolve figure size
+            if args.pix_width is not None or args.pix_height is not None:
+                dpi = args.dpi
+                w_in = (args.pix_width or int(args.figsize.split(",")[0])) / dpi
+                h_in = (args.pix_height or int(args.figsize.split(",")[1])) / dpi
+                figsize = (w_in, h_in)
+            else:
+                w_str, h_str = args.figsize.split(",")
+                figsize = (float(w_str), float(h_str))
+                dpi = args.dpi
 
-        if args.no_ground_truth:
-            fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
-            im = ax.imshow(omega_hat, origin="lower", cmap="viridis")
-            ax.set_title(rf"$\hat{{\omega}}$ decoded+residual (t={t})$")
-            ax.axis("off")
-            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            out_path = out_dir / f"{args.prefix}_t{t:04d}_decoded.png"
-        else:
-            omega_true = omega_snap[t]
-            fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
-            titles = [
-                rf"$\omega$ true (t={t})$",
-                rf"$\hat{{\omega}}$ decoded+residual (t={t})$",
-                r"error $\omega-\hat{\omega}$",
-            ]
-            for ax, data, title in zip(axes, [omega_true, omega_hat, omega_true - omega_hat], titles):
-                im = ax.imshow(data, origin="lower", cmap="viridis")
-                ax.set_title(title)
+            if args.no_ground_truth:
+                fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+                im = ax.imshow(omega_hat, origin="lower", cmap="viridis")
+                ax.set_title(rf"$\hat{{\omega}}$ decoded+residual (t={t})$")
                 ax.axis("off")
                 plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            out_path = out_dir / f"{args.prefix}_t{t:04d}_compare.png"
+                out_path = out_dir / f"{args.prefix}_t{t:04d}_decoded.png"
+            else:
+                omega_true = omega_snap[t]
+                fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
+                titles = [
+                    rf"$\omega$ true (t={t})$",
+                    rf"$\hat{{\omega}}$ decoded+residual (t={t})$",
+                    r"error $\omega-\hat{\omega}$",
+                ]
+                for ax, data, title in zip(axes, [omega_true, omega_hat, omega_true - omega_hat], titles):
+                    im = ax.imshow(data, origin="lower", cmap="viridis")
+                    ax.set_title(title)
+                    ax.axis("off")
+                    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                out_path = out_dir / f"{args.prefix}_t{t:04d}_compare.png"
 
-        fig.savefig(out_path, dpi=dpi)
-        if graphic_enabled and (args.graphic_every > 0) and (len(snap_ts) > 0):
-            if (t // args.stride) % max(args.graphic_every // args.stride, 1) == 0:
-                fig.canvas.draw_idle()
-                plt.pause(0.001)
-        plt.close(fig)
-        print(f"saved {out_path}")
-        if args.progress_every:
-            print(f"[snapshot] done t={t}")
+            fig.savefig(out_path, dpi=dpi)
+            if graphic_enabled and (args.graphic_every > 0) and (len(snap_ts) > 0):
+                if (t // args.stride) % max(args.graphic_every // args.stride, 1) == 0:
+                    fig.canvas.draw_idle()
+                    plt.pause(0.001)
+            plt.close(fig)
+            print(f"saved {out_path}")
+            if args.progress_every:
+                print(f"[snapshot] done t={t}")
 
     if args.timing:
         per_frame = t_decode_total / max(len(snap_ts), 1)
         print(f"[timing] encode={t_enc:.3f}s  learn={t_learn:.3f}s  rollout={t_roll:.3f}s  decode_total={t_decode_total:.3f}s  decode_per_snap={per_frame:.3f}s  backend={backend_selected} dtype={sim_dtype}")
+
+    if args.log_metrics is not None:
+        import json
+        metrics = {
+            "N": args.N,
+            "steps": args.steps,
+            "stride": args.stride,
+            "dt": args.dt,
+            "backend": backend_selected,
+            "fft_backend": args.fft_backend,
+            "dtype": str(sim_dtype),
+            "encode_s": float(t_enc),
+            "learn_s": float(t_learn),
+            "rollout_s": float(t_roll),
+            "decode_total_s": float(t_decode_total),
+            "decode_per_snap_s": float(t_decode_total / max(len(snap_ts), 1)),
+            "hash_every": args.hash_every,
+            "hashes": hashes,
+        }
+        args.log_metrics.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.log_metrics, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        if args.progress_every:
+            print(f"[metrics] wrote {args.log_metrics}")
 
 
 if __name__ == "__main__":

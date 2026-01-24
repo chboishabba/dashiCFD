@@ -19,6 +19,12 @@ from dashi_cfd_operator_v4 import (
     encode_proxy,
     learn_linear_operator,
     decode_with_residual,
+    smagorinsky_nu,
+    step_rk2,
+    smooth2d,
+    fft2,
+    ifft2,
+    set_fft_executor,
 )
 
 
@@ -44,16 +50,106 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pix-width", type=int, default=None, dest="pix_width", help="explicit pixel width; overrides figsize if set")
     p.add_argument("--pix-height", type=int, default=None, dest="pix_height", help="explicit pixel height; overrides figsize if set")
     p.add_argument("--progress-every", type=int, default=0, dest="progress_every", help="print progress every K steps (0 = silent)")
+    p.add_argument(
+        "--graphic-every",
+        type=int,
+        default=0,
+        dest="graphic_every",
+        help="update a live matplotlib window every K saved snapshots (0 = disabled)",
+    )
     p.add_argument("--traj-npz", type=Path, default=None, help="npz with key 'traj' to reuse ground truth instead of recomputing")
     p.add_argument("--no-ground-truth", action="store_true", help="skip ω_true/error panels; requires --traj-npz if encoding is needed")
+    p.add_argument("--z0-npz", type=Path, default=None, help="proxy state file with keys z, mask_low, anchor_idx to start kernel-only")
+    p.add_argument("--kernel-only", action="store_true", help="skip LES entirely; requires --z0-npz")
     p.add_argument("--save-traj", type=Path, default=None, help="path to save computed trajectory npz (key 'traj')")
     p.add_argument("--timing", action="store_true", help="print timing for encode/learn/rollout/decode loop")
+    p.add_argument("--dtype", type=str, choices=["auto", "float32", "float64"], default="auto", help="LES dtype (default auto: float64 when N>1024 else float32)")
+    p.add_argument("--backend", type=str, choices=["cpu", "accelerated", "vulkan"], default="cpu", help="dashiCORE backend for ternary ops (if available)")
+    p.add_argument("--fft-backend", type=str, choices=["numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"], default="numpy", help="FFT backend (vkFFT routes FFTs to GPU when available)")
     return p.parse_args()
+
+
+def simulate_les_trajectory_stream(
+    N: int,
+    steps: int,
+    dt: float,
+    nu0: float,
+    Cs: float,
+    seed: int = 0,
+    dtype=np.float32,
+):
+    np.random.seed(seed)
+    dx, KX, KY, K2 = make_grid(N)
+    omega = smooth2d(np.random.randn(N, N).astype(dtype), 11)
+    omega = (omega - omega.mean()) / (omega.std() + 1e-12)
+    yield 0, omega.astype(dtype)
+    for step in range(steps):
+        psi = ifft2(fft2(omega) / K2)
+        u = ifft2(1j * KY * fft2(psi))
+        v = -ifft2(1j * KX * fft2(psi))
+        nu_t = np.maximum(0.0, smagorinsky_nu(u, v, KX, KY, Cs, dx)).astype(dtype)
+        omega = step_rk2(omega, nu0 + nu_t, dt, KX, KY, K2).astype(dtype)
+        yield step + 1, omega
 
 
 def main():
     args = parse_args()
     snap_ts = list(range(args.stride, args.steps + 1, args.stride))
+    # dtype selection
+    if args.dtype == "auto":
+        sim_dtype = np.float64 if args.N > 1024 else np.float32
+    else:
+        sim_dtype = np.float64 if args.dtype == "float64" else np.float32
+
+    # backend setup (optional)
+    backend_selected = "cpu"
+    fft_executor = None
+    if args.backend != "cpu":
+        try:
+            import sys as _sys
+            core_root = Path(__file__).resolve().parent / "dashiCORE"
+            if str(core_root) not in _sys.path:
+                _sys.path.insert(0, str(core_root))
+            from dashi_core.backend.registry import set_backend, list_backends  # type: ignore
+            if args.backend == "accelerated":
+                set_backend("accelerated")
+                backend_selected = "accelerated"
+            elif args.backend == "vulkan":
+                try:
+                    from gpu_vulkan_backend import probe_and_register_vulkan_backend  # type: ignore
+                    backend, icd = probe_and_register_vulkan_backend()
+                    if backend is not None:
+                        set_backend("vulkan")
+                        backend_selected = "vulkan"
+                    else:
+                        print("[warn] Vulkan backend unavailable; falling back to CPU")
+                except Exception as e:  # pragma: no cover
+                    print(f"[warn] Vulkan backend init failed ({e}); falling back to CPU")
+        except Exception as e:
+            print(f"[warn] backend selection unavailable ({e}); using CPU")
+            backend_selected = "cpu"
+
+    # FFT backend setup (optional vkFFT)
+    if args.fft_backend != "numpy":
+        try:
+            import sys as _sys
+            core_root = Path(__file__).resolve().parent / "dashiCORE"
+            if str(core_root) not in _sys.path:
+                _sys.path.insert(0, str(core_root))
+            from gpu_vkfft_adapter import VkFFTExecutor  # type: ignore
+            handles = None
+            if args.fft_backend == "vkfft-vulkan":
+                try:
+                    from gpu_vulkan_dispatcher import create_vulkan_handles  # type: ignore
+                    handles = create_vulkan_handles()
+                except Exception as e:
+                    print(f"[warn] vkFFT Vulkan handles unavailable ({e}); using NumPy FFT")
+            fft_executor = VkFFTExecutor(handles=handles, fft_backend=args.fft_backend)
+            set_fft_executor(fft_executor)
+        except Exception as e:
+            print(f"[warn] fft-backend {args.fft_backend} unavailable ({e}); using NumPy FFT")
+            set_fft_executor(None)
+
     cfg = ProxyConfig(
         k_cut=args.k_cut,
         resid_mid_cut=args.resid_mid_cut,
@@ -61,8 +157,25 @@ def main():
         dashi_smooth_k=args.dashi_smooth_k,
     )
 
-    # Baseline LES or loaded trajectory
-    if args.traj_npz is not None:
+    # Baseline LES or loaded trajectory (stream by default) or kernel-only
+    if args.kernel_only:
+        if args.z0_npz is None:
+            raise SystemExit("--kernel-only requires --z0-npz (z, mask_low, anchor_idx)")
+        data = np.load(args.z0_npz)
+        for key in ("z", "mask_low", "anchor_idx"):
+            if key not in data:
+                raise SystemExit(f"--z0-npz missing key '{key}'")
+        z0 = data["z"]
+        mask_low0 = data["mask_low"].astype(bool)
+        anchor_idx = data["anchor_idx"].astype(np.int64)
+        grid = make_grid(args.N)
+        Z = np.stack([z0])  # only needed to align shapes
+        traj_stream = []
+        traj_save = None
+        omega_snap = {}
+        args.steps = max(args.steps, 1)
+        snap_ts = list(range(args.stride, args.steps + 1, args.stride))
+    elif args.traj_npz is not None:
         data = np.load(args.traj_npz)
         if "traj" not in data:
             raise SystemExit("npz must contain key 'traj'")
@@ -70,22 +183,17 @@ def main():
         args.steps = min(args.steps, traj.shape[0] - 1)
         dx, KX, KY, K2 = make_grid(args.N)
         grid = (dx, KX, KY, K2)
+        traj_stream = ((t, traj[t]) for t in range(args.steps + 1))
+        traj_save = None
+        omega_snap = {t: traj[t] for t in snap_ts} if not args.no_ground_truth else {}
     else:
         if args.no_ground_truth:
             raise SystemExit("--no-ground-truth requires --traj-npz to supply encoded data")
-        traj, grid, _ = simulate_les_trajectory(
-            N=args.N,
-            steps=args.steps,
-            dt=args.dt,
-            nu0=args.nu0,
-            Cs=args.Cs,
-            seed=args.seed,
-        )
-        if args.save_traj is not None:
-            args.save_traj.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(args.save_traj, traj=traj)
-            if args.progress_every:
-                print(f"[save] wrote trajectory to {args.save_traj}")
+        dx, KX, KY, K2 = make_grid(args.N)
+        grid = (dx, KX, KY, K2)
+        traj_stream = simulate_les_trajectory_stream(args.N, args.steps, args.dt, args.nu0, args.Cs, args.seed, dtype=sim_dtype)
+        traj_save = [] if args.save_traj is not None else None
+        omega_snap = {}
 
     # Encode trajectory
     mask_low0 = None
@@ -93,15 +201,29 @@ def main():
     Z = []
     import time
     t_enc_start = time.perf_counter()
-    for t in range(args.steps + 1):
-        z, mask_low, anchor_idx = encode_proxy(traj[t], grid, cfg, anchor_idx=anchor_idx)
-        if mask_low0 is None:
-            mask_low0 = mask_low
-        Z.append(z)
-        if args.progress_every and (t % args.progress_every == 0):
-            print(f"[encode] t={t}/{args.steps}")
-    Z = np.stack(Z, axis=0)
-    t_enc = time.perf_counter() - t_enc_start
+    if args.kernel_only:
+        # Z already seeded with z0; ensure shape consistency
+        t_enc = 0.0
+    else:
+        for t, omega in traj_stream:
+            if (not args.no_ground_truth) and (t in snap_ts):
+                omega_snap[t] = omega.copy()
+            if traj_save is not None:
+                traj_save.append(omega.copy())
+            z, mask_low, anchor_idx = encode_proxy(omega.astype(np.float64), grid, cfg, anchor_idx=anchor_idx)
+            if mask_low0 is None:
+                mask_low0 = mask_low
+            Z.append(z)
+            if args.progress_every and (t % args.progress_every == 0):
+                print(f"[encode] t={t}/{args.steps}")
+        Z = np.stack(Z, axis=0)
+        t_enc = time.perf_counter() - t_enc_start
+        if traj_save is not None:
+            arr = np.stack(traj_save, axis=0)
+            args.save_traj.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(args.save_traj, traj=arr)
+            if args.progress_every:
+                print(f"[save] wrote trajectory to {args.save_traj}")
 
     # Learn linear operator and rollout
     t_learn_start = time.perf_counter()
@@ -109,22 +231,38 @@ def main():
     t_learn = time.perf_counter() - t_learn_start
 
     t_roll_start = time.perf_counter()
-    Zhat = np.zeros_like(Z)
-    Zhat[0] = Z[0]
+    Zhat = Z[0:2].copy()  # keep two slots for rolling state
+    Zhat_snap = {}
     for t in range(args.steps):
-        Zhat[t + 1] = Zhat[t] @ A
+        Zhat[1] = Zhat[0] @ A
         if args.progress_every and (t % args.progress_every == 0):
             print(f"[rollout] t={t+1}/{args.steps}")
+        if (t + 1) in snap_ts:
+            Zhat_snap[t + 1] = Zhat[1].copy()
+        Zhat[0], Zhat[1] = Zhat[1], Zhat[0]
     t_roll = time.perf_counter() - t_roll_start
 
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t_decode_total = 0.0
+    graphic_warned = False
+    graphic_enabled = args.graphic_every > 0
+    if graphic_enabled:
+        import matplotlib
+
+        if matplotlib.get_backend().lower() == "agg":
+            graphic_enabled = False
+            graphic_warned = True
+            print("[warn] --graphic-every ignored because MPLBACKEND=Agg")
+        else:
+            plt.ion()
+
     for t in snap_ts:
         t_dec_start = time.perf_counter()
+        z_curr = Zhat_snap.get(t, Zhat[0])
         rng = np.random.default_rng(args.residual_seed + 1000003 * t)
-        omega_hat, _, _, _ = decode_with_residual(Zhat[t], grid, cfg, mask_low0, anchor_idx, rng)
+        omega_hat, _, _, _ = decode_with_residual(z_curr, grid, cfg, mask_low0, anchor_idx, rng, atoms=None)
         t_decode_total += time.perf_counter() - t_dec_start
 
         # Resolve figure size
@@ -146,7 +284,7 @@ def main():
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             out_path = out_dir / f"{args.prefix}_t{t:04d}_decoded.png"
         else:
-            omega_true = traj[t]
+            omega_true = omega_snap[t]
             fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
             titles = [
                 rf"$\omega$ true (t={t})$",
@@ -161,6 +299,10 @@ def main():
             out_path = out_dir / f"{args.prefix}_t{t:04d}_compare.png"
 
         fig.savefig(out_path, dpi=dpi)
+        if graphic_enabled and (args.graphic_every > 0) and (len(snap_ts) > 0):
+            if (t // args.stride) % max(args.graphic_every // args.stride, 1) == 0:
+                fig.canvas.draw_idle()
+                plt.pause(0.001)
         plt.close(fig)
         print(f"saved {out_path}")
         if args.progress_every:
@@ -168,7 +310,7 @@ def main():
 
     if args.timing:
         per_frame = t_decode_total / max(len(snap_ts), 1)
-        print(f"[timing] encode={t_enc:.3f}s  learn={t_learn:.3f}s  rollout={t_roll:.3f}s  decode_total={t_decode_total:.3f}s  decode_per_snap={per_frame:.3f}s")
+        print(f"[timing] encode={t_enc:.3f}s  learn={t_learn:.3f}s  rollout={t_roll:.3f}s  decode_total={t_decode_total:.3f}s  decode_per_snap={per_frame:.3f}s  backend={backend_selected} dtype={sim_dtype}")
 
 
 if __name__ == "__main__":

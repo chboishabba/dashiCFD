@@ -20,6 +20,10 @@ from __future__ import annotations
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+try:
+    from dashi_core.atoms import VortexAtom2D  # optional atom support
+except Exception:
+    VortexAtom2D = None
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -28,8 +32,31 @@ from time import perf_counter
 # Spectral utilities (periodic box)
 # -----------------------------
 
-def fft2(a): return np.fft.fft2(a)
-def ifft2(a): return np.fft.ifft2(a).real
+_FFT_EXECUTOR = None
+
+
+def set_fft_executor(executor):
+    """Install an optional FFT executor (e.g., vkFFT)."""
+    global _FFT_EXECUTOR
+    _FFT_EXECUTOR = executor
+
+
+def clear_fft_executor():
+    """Remove any custom FFT executor (reverts to NumPy)."""
+    global _FFT_EXECUTOR
+    _FFT_EXECUTOR = None
+
+
+def fft2(a):
+    if _FFT_EXECUTOR is not None:
+        return _FFT_EXECUTOR.fft2(a)
+    return np.fft.fft2(a)
+
+
+def ifft2(a):
+    if _FFT_EXECUTOR is not None:
+        return _FFT_EXECUTOR.ifft2(a).real
+    return np.fft.ifft2(a).real
 
 def make_grid(N: int, L: float = 2*np.pi):
     dx = L / N
@@ -184,6 +211,8 @@ def circular_kmask(KX, KY, k_cut: float):
     return (kmag <= k_cut)
 
 def encode_proxy(omega: np.ndarray, grid, cfg: ProxyConfig, anchor_idx=None):
+    if not np.isfinite(omega).all():
+        raise RuntimeError("Non-finite values in omega before encoding (try float64, smaller dt/Cs)")
     dx, KX, KY, K2 = grid
     N = omega.shape[0]
 
@@ -245,6 +274,7 @@ def decode_with_residual(
     mask_low: np.ndarray,
     anchor_idx,
     rng: np.random.Generator,
+    atoms: list = None,
 ):
     dx, KX, KY, K2 = grid
     N = KX.shape[0]
@@ -319,6 +349,19 @@ def decode_with_residual(
     r_mid = synth_band(mid, target_mid_E, n_mid)
     r_high = synth_band(high, target_high_E, n_high)
     omega_hat = omega_lp + r_mid + r_high
+    # Optional atom splat (coherent vortices)
+    if atoms and VortexAtom2D is not None:
+        # simple Gaussian splat per atom
+        xs = (np.arange(N) + 0.5) * (2 * np.pi / N)
+        X, Y = np.meshgrid(xs, xs, indexing="ij")
+        for a in atoms:
+            dx = X - a.x
+            dy = Y - a.y
+            dx = (dx + np.pi) % (2*np.pi) - np.pi
+            dy = (dy + np.pi) % (2*np.pi) - np.pi
+            r2 = dx*dx + dy*dy
+            w = np.exp(-r2 / (2 * (a.radius**2)))
+            omega_hat += a.sign * a.gamma * w
     return omega_hat, omega_lp, m, s
 
 

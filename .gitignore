@@ -1,2 +1,3 @@
 dashiCORE/
 __pycache__/
+*.npz

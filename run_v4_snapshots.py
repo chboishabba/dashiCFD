@@ -11,6 +11,7 @@ import argparse
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 from dashi_cfd_operator_v4 import (
     simulate_les_trajectory,
@@ -66,6 +67,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dtype", type=str, choices=["auto", "float32", "float64"], default="auto", help="LES dtype (default auto: float64 when N>1024 else float32)")
     p.add_argument("--backend", type=str, choices=["cpu", "accelerated", "vulkan"], default="cpu", help="dashiCORE backend for ternary ops (if available)")
     p.add_argument("--fft-backend", type=str, choices=["numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"], default="numpy", help="FFT backend (vkFFT routes FFTs to GPU when available)")
+    p.add_argument("--op-backend", type=str, choices=["auto", "cpu", "vulkan"], default="cpu", help="backend for proxy rollout matmul (auto: try vulkan gemv)")
+    p.add_argument("--decode-backend", type=str, choices=["cpu", "vulkan"], default="cpu", help="decode backend for snapshots (default: cpu)")
+    p.add_argument("--permissive-backends", action="store_true", help="allow GPU backend fallback to CPU instead of raising")
     p.add_argument("--A-npz", type=Path, default=None, dest="A_npz", help="npz containing learned operator under key 'A' (required for --kernel-only)")
     p.add_argument("--no-decode", action="store_true", help="skip decoding/plotting (throughput mode)")
     p.add_argument("--hash-every", type=int, default=0, dest="hash_every", help="hash proxy state every K steps (0=off)")
@@ -249,19 +253,68 @@ def main():
     t_roll_start = time.perf_counter()
     Z_arr = np.asarray(Z)
     D = Z_arr.shape[1]
-    Zhat = np.zeros((2, D), dtype=Z_arr.dtype)
-    Zhat[0] = Z_arr[0]
+
+    # Operator backend (CPU or Vulkan GEMV)
+    op_backend_req = args.op_backend
+    op_backend = "cpu"
+    op_device = "cpu"
+    vulkan_exec = None
+    A_op = A
+    Z_dtype = Z_arr.dtype
+    perf_flags = []
+    decode_backend_req = args.decode_backend
+    decode_backend_used = decode_backend_req
+    decode_device = "cpu"
+    if op_backend_req in ("auto", "vulkan"):
+        try:
+            from gpu_vulkan_gemv import VulkanGemvExecutor, has_vulkan
+
+            if has_vulkan():
+                if "VK_ICD_FILENAMES" not in os.environ:
+                    candidates = [
+                        Path("/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"),
+                        Path("/usr/share/vulkan/icd.d/amd_icd64.json"),
+                        Path("/usr/share/vulkan/icd.d/nvidia_icd.json"),
+                    ] + list(Path("/usr/share/vulkan/icd.d").glob("*.json")) + list(Path("/etc/vulkan/icd.d").glob("*.json"))
+                    for icd in candidates:
+                        if icd.is_file():
+                            os.environ["VK_ICD_FILENAMES"] = str(icd)
+                            break
+                vulkan_exec = VulkanGemvExecutor(D)
+                op_backend = "vulkan"
+                op_device = "gpu"
+                A_op = A.astype(np.float32)
+                Z_dtype = np.float32
+            else:
+                if op_backend_req == "vulkan":
+                    raise RuntimeError("Vulkan not available")
+        except Exception as exc:
+            perf_flags.append(f"GPU_ROLLOUT_FALLBACK_CPU ({exc})")
+            vulkan_exec = None
+            op_backend = "cpu"
+            op_device = "cpu"
+
+    Zhat = np.zeros((2, D), dtype=Z_dtype)
+    Zhat[0] = Z_arr[0].astype(Z_dtype)
+    def to_cpu(x):
+        return np.asarray(x)
+
     import hashlib
     hashes = []
     Zhat_snap = {}
     for t in range(args.steps):
-        Zhat[1] = Zhat[0] @ A
+        if vulkan_exec is not None:
+            Zhat[1] = vulkan_exec.gemv(A_op, Zhat[0])
+        else:
+            Zhat[1] = Zhat[0] @ A_op
+
+        z_host = to_cpu(Zhat[1])
         if args.progress_every and (t % args.progress_every == 0):
             print(f"[rollout] t={t+1}/{args.steps}")
         if (t + 1) in snap_ts:
-            Zhat_snap[t + 1] = Zhat[1].copy()
+            Zhat_snap[t + 1] = z_host.copy()
         if args.hash_every and ((t + 1) % args.hash_every == 0):
-            h = hashlib.blake2b(Zhat[1].astype(np.float64).tobytes(), digest_size=16).hexdigest()
+            h = hashlib.blake2b(z_host.astype(np.float64).tobytes(), digest_size=16).hexdigest()
             hashes.append({"t": t + 1, "hash": h})
         Zhat[0], Zhat[1] = Zhat[1], Zhat[0]
     t_roll = time.perf_counter() - t_roll_start
@@ -285,9 +338,24 @@ def main():
     if (not args.no_decode) and len(snap_ts) > 0:
         for t in snap_ts:
             t_dec_start = time.perf_counter()
-            z_curr = Zhat_snap.get(t, Zhat[0])
+            z_curr = Zhat_snap.get(t, to_cpu(Zhat[0]))
             rng = np.random.default_rng(args.residual_seed + 1000003 * t)
-            omega_hat, _, _, _ = decode_with_residual(z_curr, grid, cfg, mask_low0, anchor_idx, rng, atoms=None)
+            omega_hat, _, _, _, decode_info = decode_with_residual(
+                z_curr,
+                grid,
+                cfg,
+                mask_low0,
+                anchor_idx,
+                rng,
+                atoms=None,
+                backend=decode_backend_req,
+                allow_fallback=args.permissive_backends,
+                fft_backend=args.fft_backend,
+            )
+            decode_backend_used = decode_info.get("backend_used", decode_backend_used)
+            decode_device = decode_info.get("device", decode_device)
+            if decode_info.get("flags"):
+                perf_flags.extend(decode_info["flags"])
             t_decode_total += time.perf_counter() - t_dec_start
 
             # Resolve figure size
@@ -345,8 +413,15 @@ def main():
             "stride": args.stride,
             "dt": args.dt,
             "backend": backend_selected,
-            "fft_backend": args.fft_backend,
+            "fft_backend_requested": args.fft_backend,
+            "fft_backend_used": args.fft_backend,
             "dtype": str(sim_dtype),
+            "op_backend": op_backend,
+            "op_device": op_device,
+            "decode_backend_requested": decode_backend_req,
+            "decode_backend_used": decode_backend_used,
+            "decode_device": decode_device,
+            "gpu_hotloop_active": bool(op_backend == "vulkan" and op_device == "gpu"),
             "encode_s": float(t_enc),
             "learn_s": float(t_learn),
             "rollout_s": float(t_roll),
@@ -355,6 +430,12 @@ def main():
             "hash_every": args.hash_every,
             "hashes": hashes,
         }
+        if backend_selected != "cpu" and op_device == "cpu":
+            metrics["perf_flags"] = ["GPU_ROLLOUT_NOT_IMPLEMENTED_VULKAN"]
+        if decode_backend_req == "vulkan" and decode_backend_used != "vulkan":
+            metrics.setdefault("perf_flags", []).append("GPU_DECODE_FELLBACK_CPU")
+        if perf_flags:
+            metrics.setdefault("perf_flags", []).extend(perf_flags)
         args.log_metrics.parent.mkdir(parents=True, exist_ok=True)
         with open(args.log_metrics, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)

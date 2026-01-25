@@ -377,3 +377,211 @@ Velocity/pressure are derived products (solve Poisson / Biot–Savart), and can 
 
 * **LES comparison claim:** v5 strictly generalises LES-like behaviour as a *special chart choice* (degenerate spectral/grid chart) and recovers it when you collapse the atom set and retain only coarse background. 
 * **Fidelity slider claim:** fidelity is controlled by representation (atom/jet budget + MDL thresholds), not by changing the underlying operator definition.
+
+
+Yes — we can formalise **“atom threads”** as a first-class object the same way we just did for “LES is a degenerate chart,” and it plugs directly into the v5 contract (transport + MDL prune/merge/split) .
+
+Below is a clean, publishable formalisation.
+
+---
+
+# Atom threads: a formal contract
+
+## 1. Intuition in one line
+
+A **thread** is the identity-carrying “worldline” of an atom through time, even when atoms **split** or **merge** under MDL; the result is not a set of trajectories but a **genealogy DAG**.
+
+---
+
+## 2. Objects
+
+### Definition 1 (Atom state space)
+
+Let (\mathcal{A}) be the space of canonical atoms (oriented 1-currents with carrier factored as support×sign×magnitude and geometry represented in an admissible chart). An atom at time (t) is (a \in \mathcal{A}).
+
+A v5 global state is
+[
+S_t=(A_t,b_t),\qquad A_t\subset \mathcal{A}\ \text{finite}.
+]
+(As in the v5 operator definition.) 
+
+### Definition 2 (One-step operator with eventful normal form)
+
+Write the v5 step as
+[
+S_{t+\Delta t} = F_{v5}(S_t;\Delta t,\mathrm{ctx})
+]
+with the MDL normal form substep
+[
+A_{t+\Delta t} = \Pi_{\mathrm{MDL}}(A'_t),
+]
+where (A'*t) are transported atoms, and (\Pi*{\mathrm{MDL}}) performs **prune/merge/split/budgeting** deterministically. 
+
+The key point: (\Pi_{\mathrm{MDL}}) is **eventful**: it creates/destructs atoms.
+
+---
+
+## 3. Threads as a genealogy graph
+
+### Definition 3 (Thread graph / lineage DAG)
+
+Fix a discrete time index (t\in{0,1,2,\dots}). Define a directed acyclic graph
+[
+\mathcal{G}=(V,E)
+]
+where:
+
+* each vertex (v\in V) is an **atom-instance** (v=(t,i)) meaning “the (i)-th atom in (A_t)”,
+* edges encode **parent (\to) child** relations produced by the v5 step.
+
+So edges only go forward in time:
+[
+((t,i)\to(t+1,j))\in E.
+]
+This DAG is the formal object corresponding to “atom threads.”
+
+### Definition 4 (Event partition of edges)
+
+Edges are produced by exactly one of these event types:
+
+1. **Transport continuation** (no topological change)
+   [
+   (t,i)\to(t+1,j)\quad\text{if atom (i) persists as (j)}.
+   ]
+
+2. **Split event**
+   [
+   (t,i)\to(t+1,j_k)\quad\text{for multiple children }k=1..m.
+   ]
+
+3. **Merge event**
+   [
+   (t,i_\ell)\to(t+1,j)\quad\text{for multiple parents }\ell=1..m.
+   ]
+
+4. **Prune (death)**
+   [
+   (t,i)\ \text{has no outgoing edge}.
+   ]
+
+5. **Birth (creation)**
+   [
+   (t+1,j)\ \text{has no incoming edge}.
+   ]
+
+So a “thread” is not always a single chain; it is a branch/merge structure.
+
+---
+
+## 4. Deterministic threading requires a matching rule
+
+### Definition 5 (Atom similarity and admissible matching)
+
+Let (d:\mathcal{A}\times\mathcal{A}\to\mathbb{R}_{\ge 0}) be an admissible distance (a metric or pseudo-metric) that is:
+
+* invariant under the representation gauge (polyline vs spline parameterisation),
+* sensitive to the physical features you care about (geometry, sign, circulation, core).
+
+Typical structure:
+[
+d(a,a') = w_g,d_{\text{geom}}(\gamma,\gamma') + w_\Gamma|\Gamma-\Gamma'| + w_\sigma\mathbf{1}[\sigma\neq\sigma'] + w_\varepsilon|\varepsilon-\varepsilon'| + w_\xi d_\xi(\xi,\xi').
+]
+
+Given transported atoms (A'*t) and post-MDL atoms (A*{t+1}), define an assignment/matching (\mathcal{M}\subset A'*t\times A*{t+1}).
+
+### Definition 6 (Threading rule)
+
+A **threading rule** is a deterministic map that produces edges (E_t\subset V_t\times V_{t+1}) by solving:
+
+* **Continuation candidates**: match atoms by minimising total cost
+  [
+  \min_{\mathcal{M}} \sum_{(a,a')\in \mathcal{M}} d(a,a')
+  ]
+  subject to one-to-one constraints *for continuation edges*, plus allowances for split/merge events.
+
+* **Split/merge detection**: if no good one-to-one match exists, create one-to-many / many-to-one edges using a deterministic criterion (e.g. curvature threshold for split; proximity+alignment for merge as in your v5 rules). 
+
+* **Tie-breakers**: fixed ordering (e.g. by atom ID hash, then by (\Gamma), etc.) ensures determinism.
+
+This makes the thread graph a **function of the state**, not an artefact of logging.
+
+---
+
+## 5. Conservation laws on the thread graph
+
+This is where “threads” become publishable rather than vibes.
+
+### Definition 7 (Additive atom invariants)
+
+An atom functional (Q:\mathcal{A}\to\mathbb{R}) is **additive under merge/split** if the MDL rules enforce:
+
+* Split: (Q(a) \approx \sum_k Q(a_k))
+* Merge: (\sum_\ell Q(a_\ell) \approx Q(a))
+
+Examples (depending on your design choices):
+
+* circulation magnitude (\Gamma) (additive)
+* signed circulation (\sigma\Gamma) (additive with sign)
+* enstrophy-like proxy (approximately conserved with controlled dissipation)
+
+### Theorem 1 (Thread-flow balance law)
+
+Let (Q) be an additive invariant up to bounded error (\epsilon_t) per step (to allow viscosity/MDL pruning). Then for any node ((t+1,j)),
+[
+Q(a_{t+1,j}) \approx \sum_{(t,i)\to(t+1,j)} Q(a'*{t,i}) ;+; \eta*{t+1,j},
+]
+and for any parent ((t,i)),
+[
+Q(a'*{t,i}) \approx \sum*{(t,i)\to(t+1,j)} Q(a_{t+1,j}) ;+; \zeta_{t,i},
+]
+where the residuals (\eta,\zeta) are deterministically attributable to:
+
+* prune thresholds ((\Gamma<\Gamma_{\min}), min length),
+* explicit dissipation/viscosity,
+* budget truncation,
+* any deliberate non-conservative merge rule.
+
+**Meaning:** the thread graph is a **flow network** for conserved quantities.
+
+This is the formal backbone for “atom threads carry physical stuff through time.”
+
+---
+
+## 6. Complexity and the “threaded MDL” guarantee
+
+### Definition 8 (Threaded description length)
+
+Define a per-time description length:
+[
+L(A_t) = \sum_{a\in A_t} \big( L_{\text{geom}}(a) + L_{\text{carrier}}(a) + L_{\text{internal}}(a) \big),
+]
+and a **threaded cost** that rewards persistence:
+[
+L_{\text{thread}}(\mathcal{G}*{0:T}) = \sum*{t=0}^T L(A_t) ;+; \sum_{e\in E} c_{\text{event}}(e),
+]
+where event costs penalise unnecessary splits/merges/births/deaths.
+
+### Theorem 2 (Thread-stability under MDL pressure)
+
+If (\Pi_{\mathrm{MDL}}) is chosen to minimise (or greedily decrease) (L(A_{t+1}) + \text{event penalties}) subject to admissibility constraints, then the induced thread graph has bounded event rate:
+[
+#{\text{split/merge/birth/death at step }t} \le f(\lambda,B,\tau,\text{forcing}),
+]
+and in the no-forcing / weakly dissipative regime, event rate decreases as (\lambda) increases (stronger MDL).
+
+**Meaning:** the fidelity slider controls not just atom count, but **thread turbulence** (how often identities get rewritten).
+
+---
+
+## 7. What you can claim in prose (tight)
+
+* “Threads” are the **identity layer** for atoms under an eventful normal form (prune/merge/split).
+* The dynamics induces a **genealogy DAG**, not a set of tracks.
+* Additive invariants define a **flow** on that DAG, giving a conservation-style audit trail.
+* MDL pressure yields **bounded thread complexity** and exposes a fidelity knob.
+
+All of this is consistent with your v5 definition (atoms as oriented currents; transport + MDL normal form; decode is a chart) .
+
+---
+
+If you want to lock this into the v5 spec cleanly, the next tiny step is: **choose the canonical (d(\cdot,\cdot))** and the **tie-breaker ordering**, because that’s what makes threads reproducible across runs.

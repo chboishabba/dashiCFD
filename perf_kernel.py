@@ -22,6 +22,7 @@ import json
 import math
 import resource
 import time
+import os
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -48,15 +49,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=100000, help="rollout steps (default: 100k)")
     p.add_argument("--decode-every", type=int, default=0, help="decode every K steps; 0 disables decode")
     p.add_argument("--no-decode", action="store_true", help="force skip decode regardless of stride")
+    p.add_argument("--decode-backend", type=str, choices=["cpu", "vulkan"], default="cpu", help="decode backend (vulkan uses vkFFT where available, otherwise falls back)")
     p.add_argument("--hash-every", type=int, default=0, help="hash z every K steps; 0 disables hashing")
     p.add_argument("--metrics-json", type=Path, default=None, help="optional metrics output file")
     p.add_argument("--progress-every", type=int, default=0, help="print progress every K steps (0=silent)")
     p.add_argument("--seed", type=int, default=0, help="base RNG seed for decode")
     p.add_argument("--backend", type=str, choices=["cpu", "accelerated", "vulkan"], default="cpu", help="dashiCORE backend for ternary ops")
     p.add_argument("--fft-backend", type=str, choices=["numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"], default="numpy", help="FFT backend for decode")
-    p.add_argument("--op-backend", type=str, choices=["auto", "cpu", "cupy", "torch"], default="auto", help="backend for z @ A operator (auto: prefer cupy, then torch, else cpu)")
+    p.add_argument(
+        "--op-backend",
+        type=str,
+        choices=["auto", "cpu", "vulkan"],
+        default="auto",
+        help="backend for z @ A operator (auto: try vulkan gemv, else cpu)",
+    )
     p.add_argument("--dtype", type=str, choices=["auto", "float32", "float64"], default="auto", help="dtype for operator math")
     p.add_argument("--mem-trace", action="store_true", help="use tracemalloc to record peak Python allocations")
+    p.add_argument("--permissive-backends", action="store_true", help="allow GPU backend fallbacks to CPU instead of raising")
     return p.parse_args()
 
 
@@ -186,6 +195,9 @@ def main():
 
     backend_active = select_backend(args.backend)
     fft_active = select_fft_backend(args.fft_backend)
+    decode_backend_req = args.decode_backend
+    decode_backend_used = decode_backend_req
+    decode_device = "cpu"
 
     A = load_operator(args, None, cfg, grid).astype(sim_dtype)
     if z0.shape[0] != A.shape[0]:
@@ -206,62 +218,49 @@ def main():
             tracemalloc_started = False
 
     # Operator backend selection
-    op_backend = args.op_backend
+    op_backend_req = args.op_backend
+    op_backend = "cpu"
     op_device = "cpu"
-    use_cupy = False
-    use_torch = False
-    cupy = None
-    torch = None
-    if op_backend in ("auto", "cupy"):
-        try:
-            import cupy  # type: ignore
-            _ = cupy.zeros(1)
-            use_cupy = True
-            op_device = "gpu"
-            op_backend = "cupy"
-        except Exception:
-            use_cupy = False
-            if args.op_backend == "cupy":
-                raise SystemExit("Requested op-backend cupy but CuPy is unavailable")
-    if not use_cupy and op_backend in ("auto", "torch"):
-        try:
-            import torch  # type: ignore
-            if torch.cuda.is_available():
-                use_torch = True
-                op_device = "gpu"
-                op_backend = "torch"
-            else:
-                if args.op_backend == "torch":
-                    raise SystemExit("Requested op-backend torch but CUDA is unavailable")
-        except Exception:
-            if args.op_backend == "torch":
-                raise SystemExit("Requested op-backend torch but torch is unavailable")
-            use_torch = False
-    if op_backend == "auto" and not (use_cupy or use_torch):
-        op_backend = "cpu"
-        op_device = "cpu"
+    vulkan_exec = None
+    A_op = A
+    z_dtype = sim_dtype
+    perf_flags = []
 
-    # Prepare operator/buffers per backend
-    if use_cupy:
-        cupy = __import__("cupy")
-        A_op = cupy.asarray(A)
-        z_buf = cupy.zeros((2, z0.shape[0]), dtype=A_op.dtype)
-        z_buf[0] = cupy.asarray(z0.astype(sim_dtype))
-        to_cpu = cupy.asnumpy
-    elif use_torch:
-        torch = __import__("torch")
-        device = torch.device("cuda")
-        A_op = torch.tensor(A, device=device)
-        z_buf = torch.zeros((2, z0.shape[0]), device=device, dtype=torch.float64 if sim_dtype == np.float64 else torch.float32)
-        z_buf[0] = torch.tensor(z0.astype(sim_dtype), device=device)
-        def to_cpu(x):
-            return x.detach().cpu().numpy()
-    else:
-        A_op = A
-        z_buf = np.zeros((2, z0.shape[0]), dtype=sim_dtype)
-        z_buf[0] = z0.astype(sim_dtype)
-        def to_cpu(x):
-            return np.asarray(x)
+    if op_backend_req in ("auto", "vulkan"):
+        try:
+            from gpu_vulkan_gemv import VulkanGemvExecutor, has_vulkan
+
+            if has_vulkan():
+                # Ensure an ICD is selected for headless use.
+                if "VK_ICD_FILENAMES" not in os.environ:
+                    candidates = [
+                        Path("/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"),
+                        Path("/usr/share/vulkan/icd.d/amd_icd64.json"),
+                        Path("/usr/share/vulkan/icd.d/nvidia_icd.json"),
+                    ] + list(Path("/usr/share/vulkan/icd.d").glob("*.json")) + list(Path("/etc/vulkan/icd.d").glob("*.json"))
+                    for icd in candidates:
+                        if icd.is_file():
+                            os.environ["VK_ICD_FILENAMES"] = str(icd)
+                            break
+                vulkan_exec = VulkanGemvExecutor(A.shape[0])
+                op_backend = "vulkan"
+                op_device = "gpu"
+                z_dtype = np.float32  # executor is float32
+                A_op = A.astype(np.float32)
+            else:
+                if op_backend_req == "vulkan":
+                    raise RuntimeError("Vulkan not available")
+        except Exception as exc:
+            perf_flags.append(f"GPU_ROLLOUT_FALLBACK_CPU ({exc})")
+            vulkan_exec = None
+            op_backend = "cpu"
+            op_device = "cpu"
+
+    z_buf = np.zeros((2, z0.shape[0]), dtype=z_dtype)
+    z_buf[0] = z0.astype(z_dtype)
+
+    def to_cpu(x):
+        return np.asarray(x)
 
     hashes = []
     decode_metrics = []
@@ -270,22 +269,12 @@ def main():
     decode_time = 0.0
     nan_inf_hits = 0
     for t in range(args.steps):
-        if use_cupy:
-            z_buf[1] = z_buf[0] @ A_op
-        elif use_torch:
-            z_buf[1] = torch.matmul(z_buf[0], A_op)
+        if vulkan_exec is not None:
+            z_buf[1] = vulkan_exec.gemv(A_op, z_buf[0])
         else:
             z_buf[1] = z_buf[0] @ A_op
 
-        z_host = None
-        if use_cupy or use_torch:
-            # Avoid extra transfers unless needed
-            z_host = None
-        else:
-            z_host = z_buf[1]
-
-        if z_host is None:
-            z_host = to_cpu(z_buf[1])
+        z_host = to_cpu(z_buf[1])
 
         if not np.isfinite(z_host).all():
             nan_inf_hits += 1
@@ -298,7 +287,7 @@ def main():
         if decode_every and (step_idx % decode_every == 0):
             t_dec = time.perf_counter()
             rng = np.random.default_rng(args.seed + step_idx)
-            omega_hat, _, _, _ = decode_with_residual(
+            omega_hat, _, _, _, decode_info = decode_with_residual(
                 z_host.astype(np.float64),
                 grid,
                 cfg,
@@ -306,11 +295,22 @@ def main():
                 anchor_idx,
                 rng,
                 atoms=None,
+                backend=decode_backend_req,
+                allow_fallback=args.permissive_backends,
+                fft_backend=fft_active,
             )
             decode_time += time.perf_counter() - t_dec
+            decode_backend_used = decode_info.get("backend_used", decode_backend_used)
+            decode_device = decode_info.get("device", decode_device)
+            flags = decode_info.get("flags", [])
+            if flags:
+                perf_flags.extend(flags)
             Eh = energy_from_omega(omega_hat, grid[1], grid[2], grid[3])
             Zh = enstrophy(omega_hat)
-            decode_metrics.append({"t": step_idx, "energy": Eh, "enstrophy": Zh})
+            entry = {"t": step_idx, "energy": Eh, "enstrophy": Zh}
+            if decode_info.get("timings"):
+                entry["timings_ms"] = decode_info["timings"]
+            decode_metrics.append(entry)
 
         if args.progress_every and (step_idx % args.progress_every == 0):
             print(f"[rollout] t={step_idx}/{args.steps}")
@@ -335,6 +335,11 @@ def main():
     steps_per_sec = steps / t_roll if t_roll > 0 else float("inf")
     decode_per_snap_ms = 1000 * decode_time / max(len(decode_metrics), 1)
 
+    if backend_active != "cpu" and op_device == "cpu" and op_backend == "cpu":
+        perf_flags.append("GPU_ROLLOUT_NOT_IMPLEMENTED_VULKAN")
+    if decode_backend_req == "vulkan" and decode_backend_used != "vulkan":
+        perf_flags.append("GPU_DECODE_FELLBACK_CPU")
+
     metrics = {
         "N": N,
         "D": int(z0.shape[0]),
@@ -355,11 +360,21 @@ def main():
         "nan_inf_hits": int(nan_inf_hits),
         "rss_max_mb": float(rss_mb),
         "peak_tracemalloc_mb": float(peak_tracemalloc_mb) if peak_tracemalloc_mb is not None else None,
-        "op_backend": op_backend,
+        "op_backend_requested": args.op_backend,
+        "op_backend_used": op_backend,
         "op_device": op_device,
+        "decode_backend_requested": decode_backend_req,
+        "decode_backend_used": decode_backend_used,
+        "decode_device": decode_device,
+        "fft_backend_requested": args.fft_backend,
+        "fft_backend_used": fft_active,
+        "gpu_hotloop_active": bool(op_backend == "vulkan" and op_device == "gpu"),
+        "perf_flags": perf_flags,
     }
 
     print(f"[perf] rollout={t_roll:.3f}s  ns/step={ns_per_step:.1f}  steps/s={steps_per_sec:.1f}  backend={backend_active} fft={fft_active} dtype={sim_dtype}")
+    if perf_flags:
+        print(f"[perf warning] {'; '.join(perf_flags)} (see dashiCORE/VK_SPV.md)")
     if decode_every:
         print(f"[decode] total={decode_time:.3f}s  per_snap={decode_per_snap_ms:.3f} ms  snaps={len(decode_metrics)}")
     if hash_every:

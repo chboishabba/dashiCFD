@@ -34,3 +34,5 @@ Date: 2026-01-24 (MPLBACKEND=Agg runs).
 - Add dependency set (`numpy`, `matplotlib`, `scikit-image` if keeping `naw2.py`).
 - Replace `plt.show()` calls with file saves for reliable headless runs.
 - Optimize `CORE_cfd_operator.py` further (e.g., jit/numba for ternary majority, optional GPU backend hook).
+- Vulkan decode backend plan (2026-01-25) recorded at `planning/vulkan_decode_stage1.md`; corresponding tasks in `TODO.md` (metrics fields, Stage 1 GPU low-pass, Stage 2 mask kernels, CLI consistency, parity tests, fp32/fp64 policy, shader artifact location).
+- Vulkan decode backend implemented (Stage 1–2): new `vulkan_decode_backend.py` with vkFFT/Vulkan pipelines for low-pass + DASHI mask (smooth/threshold/majority), new shaders under `dashiCORE/gpu_shaders/`, and CLI flags `--decode-backend` / `--permissive-backends` wired into `perf_kernel.py` and `run_v4_snapshots.py`. Metrics now log requested/used backends and `gpu_hotloop_active`. Residual synthesis still CPU-side (apply-mask combine pending GPU).

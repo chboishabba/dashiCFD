@@ -275,6 +275,9 @@ def decode_with_residual(
     anchor_idx,
     rng: np.random.Generator,
     atoms: list = None,
+    backend: str = "cpu",
+    allow_fallback: bool = False,
+    fft_backend: str = "vkfft-vulkan",
 ):
     dx, KX, KY, K2 = grid
     N = KX.shape[0]
@@ -292,14 +295,49 @@ def decode_with_residual(
     lowk = (lowk_r + 1j*lowk_i) * scale
     oh = np.zeros((N, N), dtype=np.complex128)
     oh[mask_low] = lowk
-    omega_lp = ifft2(oh)
 
-    # --- DASHI mask from ω_lowk ---
-    base = smooth2d(omega_lp, cfg.dashi_smooth_k)
-    Rlp = omega_lp - base
-    Rn = np.clip(Rlp / (np.max(np.abs(Rlp)) + 1e-12), -1, 1)
-    s = saturate_ternary(ternary_sym(Rn, cfg.dashi_tau), iters=8)
-    m = (s != 0).astype(np.float64)
+    decode_info = {
+        "backend_requested": backend,
+        "backend_used": "cpu",
+        "device": "cpu",
+        "flags": [],
+        "timings": None,
+    }
+
+    omega_lp = None
+    m = None
+    s = None
+
+    if backend == "vulkan":
+        try:
+            from vulkan_decode_backend import get_vulkan_decoder
+
+            decoder = get_vulkan_decoder(
+                N,
+                smooth_k=cfg.dashi_smooth_k,
+                majority_iters=8,
+                fft_backend=fft_backend,
+            )
+            omega_lp_gpu, sign_gpu, timings_gpu = decoder.decode_lowpass_mask(
+                oh.astype(np.complex64), tau=cfg.dashi_tau, smooth_k=cfg.dashi_smooth_k
+            )
+            omega_lp = omega_lp_gpu.astype(np.float64)
+            s = sign_gpu.astype(np.int8)
+            m = (s != 0).astype(np.float64)
+            decode_info.update(backend_used="vulkan", device="gpu", timings=timings_gpu)
+        except Exception as exc:
+            decode_info["flags"].append(f"GPU_DECODE_FALLBACK_CPU ({exc})")
+            if not allow_fallback:
+                raise
+            backend = "cpu"
+
+    if omega_lp is None or m is None or s is None:
+        omega_lp = ifft2(oh)
+        base = smooth2d(omega_lp, cfg.dashi_smooth_k)
+        Rlp = omega_lp - base
+        Rn = np.clip(Rlp / (np.max(np.abs(Rlp)) + 1e-12), -1, 1)
+        s = saturate_ternary(ternary_sym(Rn, cfg.dashi_tau), iters=8)
+        m = (s != 0).astype(np.float64)
 
     kmag = np.sqrt(KX*KX + KY*KY)
     mid = (kmag > cfg.k_cut) & (kmag <= cfg.resid_mid_cut)
@@ -362,7 +400,7 @@ def decode_with_residual(
             r2 = dx*dx + dy*dy
             w = np.exp(-r2 / (2 * (a.radius**2)))
             omega_hat += a.sign * a.gamma * w
-    return omega_hat, omega_lp, m, s
+    return omega_hat, omega_lp, m, s, decode_info
 
 
 # -----------------------------
@@ -447,7 +485,7 @@ def main():
 
         if (t % decode_every) == 0 or prev_hat is None:
             rng = np.random.default_rng(residual_seed + 1000003*t)
-            omega_hat, omega_lp, m, s = decode_with_residual(Zhat[t], grid, cfg, mask_low0, anchor_idx, rng)
+            omega_hat, omega_lp, m, s, _ = decode_with_residual(Zhat[t], grid, cfg, mask_low0, anchor_idx, rng)
             prev_hat = omega_hat
         else:
             omega_hat = prev_hat

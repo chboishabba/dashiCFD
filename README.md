@@ -11,6 +11,111 @@ CFD + DASHI experiments for 2D vorticity rollouts, ternary structural codecs, an
   - `MPLBACKEND=Agg python vortex_tester_mdl.py`
   - `MPLBACKEND=Agg CORE_BACKEND=cpu python CORE_cfd_operator.py`
 
+## Vulkan GPU commands
+
+Compile SPIR-V (preferred path `dashiCORE/spv/comp` -> `dashiCORE/spv`):
+
+```bash
+python dashiCORE/scripts/compile_spv.py
+```
+
+Kernel-only perf (GPU rollout + Vulkan decode, metrics-only readback):
+
+```bash
+python perf_kernel.py \
+  --z0-npz outputs/kernel_N128_z0.npz \
+  --A-npz outputs/kernel_N128_A.npz \
+  --steps 20000 \
+  --decode-every 200 \
+  --decode-backend vulkan \
+  --observer metrics \
+  --backend vulkan \
+  --fft-backend vkfft-vulkan \
+  --op-backend vulkan \
+  --require-gpu \
+  --metrics-json outputs/perf_metrics_gpu.json
+```
+
+Kernel-only perf (full ω̂ readback for energy/enstrophy):
+
+```bash
+python perf_kernel.py \
+  --z0-npz outputs/kernel_N128_z0.npz \
+  --A-npz outputs/kernel_N128_A.npz \
+  --steps 20000 \
+  --decode-every 200 \
+  --decode-backend vulkan \
+  --observer snapshots \
+  --backend vulkan \
+  --fft-backend vkfft-vulkan \
+  --op-backend vulkan \
+  --require-gpu \
+  --metrics-json outputs/perf_snapshots_gpu.json
+```
+
+Long kernel-only GPU run with visuals:
+
+```bash
+MPLBACKEND=Agg python run_v4_snapshots.py \
+  --kernel-only \
+  --z0-npz outputs/kernel_N128_z0.npz \
+  --A-npz outputs/kernel_N128_A.npz \
+  --steps 20000 \
+  --stride 200 \
+  --no-ground-truth \
+  --out-dir outputs \
+  --prefix kernel_N128 \
+  --backend vulkan \
+  --op-backend vulkan \
+  --decode-backend vulkan \
+  --fft-backend vkfft-vulkan \
+  --timing \
+  --progress-every 200
+```
+
+Enstrophy graph from the snapshots metrics JSON:
+
+```bash
+python scripts/plot_enstrophy.py \
+  --input outputs/perf_snapshots_gpu.json \
+  --output outputs/enstrophy_kernel_only.png
+```
+
+GPU-only LES run (vkFFT + Vulkan, enstrophy CSV + optional PNGs):
+
+```bash
+MPLBACKEND=Agg python run_les_gpu.py \
+  --N 512 \
+  --steps 20000 \
+  --dt 0.01 \
+  --nu0 1e-4 \
+  --Cs 0.17 \
+  --stats-every 200 \
+  --progress-every 2000 \
+  --viz-every 2000 \
+  --out-dir outputs \
+  --prefix les_gpu
+```
+
+Enstrophy plot from the LES CSV:
+
+```bash
+python scripts/plot_enstrophy.py \
+  --input outputs/les_gpu_enstrophy.csv \
+  --output outputs/enstrophy_les_gpu.png \
+  --format csv \
+  --title "LES GPU enstrophy"
+```
+
+Interactive CLI (recommended for day-to-day runs):
+
+```bash
+python dashi_cli.py les --interactive
+python dashi_cli.py kernel --interactive
+python dashi_cli.py plot --interactive
+python dashi_cli.py compare --interactive
+```
+
 ## Latest Run Results (2026-01-24, headless)
 - `dashi_cfd_operator_v3.py` — success; baseline 300 steps in 0.619s (2.06 ms/step). Final relL2 0.473, corr 0.881, ΔE −1.221e-03, ΔZ −1.077e-01.
 - `dashi_cfd_operator_v4.py` — success; baseline 300 steps in 0.627s (2.09 ms/step). Final relL2 0.648, corr 0.787, ΔE −2.38e-04, ΔZ −1.64e-02. Now preserves top-128 mid-band phases (indices fixed) and only synthesizes the remaining mid/high energy.

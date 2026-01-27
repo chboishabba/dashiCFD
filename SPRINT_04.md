@@ -1,3 +1,10 @@
+SPRINT 04 EXECUTION STATUS (2026-01-27)
+
+- [x] Vulkan decode batched into single submit for the core passes.
+- [x] GPU-only threshold normalization (no CPU max readback).
+- [x] Observer-driven decode readback boundary enforced.
+- [x] SPV compilation path normalized to spv/comp -> spv/ with legacy fallback.
+
 12/1/2026
 
 Great, this is a *very* clear signal, and the code you shared makes the diagnosis pretty unambiguous.

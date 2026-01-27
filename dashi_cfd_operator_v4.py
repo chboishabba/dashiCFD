@@ -212,6 +212,49 @@ class DecodePolicy:
     readback: bool = False
     allow_host_materialization: bool = False
     observer: str | None = "none"
+    metrics_readback: bool = False
+    enable_annihilation: bool = False
+    annihilation_iters: int = 0
+    annihilation_plateau_eps: float = 0.01
+    annihilation_plateau_window: int = 2
+    coherence_min: float = 0.55
+
+
+_ALLOWED_OBSERVERS = {None, "none", "metrics", "snapshots", "visualize"}
+
+
+def _validate_observer(observer: str | None) -> str | None:
+    if observer not in _ALLOWED_OBSERVERS:
+        allowed = sorted(o for o in _ALLOWED_OBSERVERS if o is not None)
+        raise ValueError(f"Unknown observer '{observer}'. Allowed: {allowed}")
+    return observer
+
+
+def decode_policy_for_observer(observer: str | None) -> DecodePolicy:
+    """
+    Map an observer intent to a concrete decode policy.
+    "none" -> GPU-only, no readback.
+    "metrics" -> GPU-only, metrics readback only.
+    "snapshots"/"visualize" -> allow full readback.
+    """
+    obs = (observer or "none").lower()
+    _validate_observer(obs)
+    if obs == "metrics":
+        return DecodePolicy(
+            readback=False,
+            observer=obs,
+            metrics_readback=True,
+            enable_annihilation=True,
+            annihilation_iters=6,
+        )
+    if obs in ("snapshots", "visualize"):
+        return DecodePolicy(
+            readback=True,
+            observer=obs,
+            metrics_readback=True,
+            enable_annihilation=False,
+        )
+    return DecodePolicy(readback=False, observer=obs, metrics_readback=False, enable_annihilation=False)
 
 def circular_kmask(KX, KY, k_cut: float):
     kmag = np.sqrt(KX*KX + KY*KY)
@@ -286,6 +329,7 @@ def decode_with_residual(
     allow_fallback: bool = False,
     fft_backend: str = "vkfft-vulkan",
     policy: DecodePolicy | None = None,
+    observer: str | None = None,
 ):
     """Decode proxy state into ω̂ with optional GPU-only mode via DecodePolicy."""
     dx, KX, KY, K2 = grid
@@ -305,7 +349,10 @@ def decode_with_residual(
     oh = np.zeros((N, N), dtype=np.complex128)
     oh[mask_low] = lowk
 
-    policy = policy or DecodePolicy()
+    if policy is None:
+        policy = decode_policy_for_observer(observer)
+    else:
+        policy.observer = _validate_observer(policy.observer)
     decode_info = {
         "backend_requested": backend,
         "backend_used": "cpu",
@@ -334,6 +381,12 @@ def decode_with_residual(
                 tau=cfg.dashi_tau,
                 smooth_k=cfg.dashi_smooth_k,
                 readback=policy.readback,
+                metrics_readback=policy.metrics_readback,
+                enable_annihilation=policy.enable_annihilation,
+                annihilation_iters=policy.annihilation_iters,
+                annihilation_plateau_eps=policy.annihilation_plateau_eps,
+                annihilation_plateau_window=policy.annihilation_plateau_window,
+                coherence_min=policy.coherence_min,
             )
             if policy.readback:
                 omega_lp = omega_lp_gpu.astype(np.float64)
@@ -342,16 +395,18 @@ def decode_with_residual(
             else:
                 decode_info["flags"].append("GPU_DECODE_NO_READBACK")
             decode_info.update(backend_used="vulkan", device="gpu", timings=timings_gpu)
+            if timings_gpu and "coherence_metrics" in timings_gpu:
+                decode_info["coherence_metrics"] = timings_gpu["coherence_metrics"]
         except Exception as exc:
             decode_info["flags"].append(f"GPU_DECODE_FALLBACK_CPU ({exc})")
             if not allow_fallback:
                 raise
             backend = "cpu"
 
-    if backend == "cpu" and not policy.readback and not policy.allow_host_materialization:
-        raise RuntimeError("decode_with_residual requires readback for CPU backend; set policy.readback=True")
+    if backend == "cpu" and not policy.readback and not policy.allow_host_materialization and not policy.metrics_readback:
+        raise RuntimeError("decode_with_residual requires readback for CPU backend unless metrics-only is requested")
 
-    if not policy.readback and backend == "vulkan":
+    if not policy.readback:
         return None, None, None, None, decode_info
 
     if omega_lp is None or m is None or s is None:
@@ -515,7 +570,7 @@ def main():
                 mask_low0,
                 anchor_idx,
                 rng,
-                policy=DecodePolicy(readback=True, observer="visualize"),
+                observer="visualize",
             )
             prev_hat = omega_hat
         else:

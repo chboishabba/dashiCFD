@@ -29,7 +29,6 @@ from typing import Dict, Tuple
 import numpy as np
 
 from dashi_cfd_operator_v4 import (
-    DecodePolicy,
     ProxyConfig,
     decode_with_residual,
     encode_proxy,
@@ -57,6 +56,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0, help="base RNG seed for decode")
     p.add_argument("--backend", type=str, choices=["cpu", "accelerated", "vulkan"], default="cpu", help="dashiCORE backend for ternary ops")
     p.add_argument("--fft-backend", type=str, choices=["numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"], default="numpy", help="FFT backend for decode")
+    p.add_argument(
+        "--observer",
+        type=str,
+        choices=["metrics", "visualize", "snapshots", "none"],
+        default="metrics",
+        help="decode observer policy (metrics=small GPU readback only; snapshots/visualize=full readback)",
+    )
     p.add_argument(
         "--op-backend",
         type=str,
@@ -311,7 +317,7 @@ def main():
                 backend=decode_backend_req,
                 allow_fallback=args.permissive_backends,
                 fft_backend=fft_active,
-                policy=DecodePolicy(readback=True, observer="metrics"),
+                observer=args.observer,
             )
             decode_time += time.perf_counter() - t_dec
             decode_backend_used = decode_info.get("backend_used", decode_backend_used)
@@ -319,11 +325,16 @@ def main():
             flags = decode_info.get("flags", [])
             if flags:
                 perf_flags.extend(flags)
-            Eh = energy_from_omega(omega_hat, grid[1], grid[2], grid[3])
-            Zh = enstrophy(omega_hat)
-            entry = {"t": step_idx, "energy": Eh, "enstrophy": Zh}
+            entry = {"t": step_idx}
+            if omega_hat is not None:
+                Eh = energy_from_omega(omega_hat, grid[1], grid[2], grid[3])
+                Zh = enstrophy(omega_hat)
+                entry["energy"] = Eh
+                entry["enstrophy"] = Zh
             if decode_info.get("timings"):
                 entry["timings_ms"] = decode_info["timings"]
+            if decode_info.get("coherence_metrics"):
+                entry["coherence_metrics"] = decode_info["coherence_metrics"]
             decode_metrics.append(entry)
 
         if args.progress_every and (step_idx % args.progress_every == 0):
@@ -380,6 +391,7 @@ def main():
         "decode_backend_requested": decode_backend_req,
         "decode_backend_used": decode_backend_used,
         "decode_device": decode_device,
+        "decode_observer": args.observer,
         "fft_backend_requested": args.fft_backend,
         "fft_backend_used": fft_active,
         "gpu_hotloop_active": bool(op_backend == "vulkan" and op_device == "gpu"),

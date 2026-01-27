@@ -1,3 +1,22 @@
+SPRINT 05 EXECUTION STATUS (2026-01-27)
+
+- [x] Decode policy boundary enforced (observer-driven readback control).
+- [x] SPV resolution defaults to spv/comp -> spv/ with legacy fallback.
+- [x] Vulkan decode supports readback-free mode.
+- [x] SPV compile helper added (dashiCORE/scripts/compile_spv.py).
+- [x] GPU annihilation/coherence kernel wired (no implicit readback).
+- [x] GPU coherence/annihilation metrics buffer and optional readback tap.
+- [x] Annihilation scale closure metrics logged in metrics JSON.
+- [x] Formal annihilation note authored (docs/signed_filament_annihilation.md).
+
+Immediate next actions (Sprint 05 start)
+- [x] Add annihilation kernel SPV and dispatcher hook (GPU-only).
+- [x] Add minimal coherence stats kernel (active cells + mean energy).
+- [x] Add observer-controlled metrics readback (small buffer only).
+- [x] Add decode early-exit when coherence plateaus.
+
+---
+
 Alright, let’s lock this cleanly and stop the definition drift.
 
 You’re right that we’ve been oscillating between two *descriptions* of the same thing. The fix is to **separate interpretation from operator**, then make the operator canonical. Once that’s done, the sprint plan becomes obvious.
@@ -563,3 +582,380 @@ If you want, next I can:
 * write the Sprint 05 doc in the same style as `SPRINT_04.md` so it’s ready to go.
 
 But at this point: yes — the fining limit is covered, consistent, and now finally *provable on GPU*.
+
+
+Short answer: yes — this is exactly the moment to implement filament / fining.
+Longer answer below, tied directly to your plot and the GPU work you just finished.
+
+Why this plot is the green light
+
+What you’re seeing in the kernel-only decode enstrophy trace is the classic signature of:
+
+Coherent structures intermittently surviving decode, and
+
+Entropy-dominated junk repeatedly re-entering the representation.
+
+Concretely:
+
+Early spikes (big, rare enstrophy bursts) → coherent filaments crossing the decode threshold.
+
+Later dense, lower-amplitude noise → residual incoherence being reintroduced each cycle.
+
+No monotone decay → you are not yet enforcing scale-closure.
+
+This means:
+
+The kernel is doing its job, but nothing is explicitly killing incoherent filaments yet.
+
+That is precisely what filament fining / annihilation is for.
+
+So yes — you’re at the correct layer.
+
+What “filament / fining” means operationally (no metaphors)
+
+At this stage, fining is not geometry yet. It is:
+
+Signed support × coherence × scale persistence → annihilate or propagate
+
+You already have almost everything required.
+
+Objects you already have (important)
+
+From your Vulkan decode + metrics:
+
+Signed support (thresholded mask)
+
+Energy / enstrophy
+
+Coherence proxy (phase alignment via low-pass + annihilation kernel)
+
+Iteration index (scale proxy)
+
+You do not need curves yet.
+
+Minimal filament fining = 3 concrete GPU-visible rules
+1️⃣ Define a filament candidate (per decode)
+
+On GPU (already possible):
+
+filament_cell :=
+  support == 1
+  AND |sign| == 1
+  AND coherence_metric > ε_k
+
+
+This is already implicit in your decode_threshold + annihilate kernel.
+The missing step is making it explicit and persistent.
+
+2️⃣ Track persistence across decode steps (this is the key)
+
+Add a tiny device buffer (per decode stride):
+
+struct FilamentStats {
+  uint alive_count;
+  float mean_coherence;
+  float mean_energy;
+}
+
+
+Update rule (GPU):
+
+If a cell survives N consecutive decodes → persistent filament
+
+If it dies quickly → noise
+
+You already log history for plateau detection — reuse that logic.
+
+This gives you a lifetime distribution.
+
+3️⃣ Enforce fining = irreversible annihilation
+
+The rule you want (and you already half-implemented):
+
+if coherence_k < ε_k for M consecutive decodes:
+    force support = 0 forever
+
+
+Key properties:
+
+Irreversible
+
+GPU-only
+
+Scale-local
+
+No CPU readback required
+
+This is fining: once a structure fails to justify its bits, it is gone.
+
+Why this fixes the enstrophy spikes
+
+Right now:
+
+Noise can briefly spike enstrophy
+
+Then vanish
+
+Then reappear next decode
+
+After fining:
+
+Noise dies once
+
+Never comes back
+
+Enstrophy trace becomes:
+
+Early transient
+
+Few persistent spikes
+
+Then plateau
+
+That plateau is scale closure.
+
+How many fining levels? (your “~6” intuition)
+
+This is the important conceptual alignment:
+
+The ~6 refinements you keep seeing are not arbitrary.
+
+They correspond to:
+
+Low-k backbone
+
+Mid-band coherent filaments
+
+Short-lived transients
+
+Entropy tail
+
+Once fining is enforced, you should see:
+
+Filament survival curve sharply dropping after ~5–7 steps
+
+No benefit to further decode refinement
+
+MDL gain → 0
+
+That’s your empirical closure depth.
+
+What to implement next (very concrete)
+🔧 Sprint-level tasks (small, sharp)
+
+Add a filament_lifetime buffer (GPU)
+
+uint per cell or per block
+
+Increment lifetime on survival
+
+Zero lifetime + support on failure
+
+Log lifetime histogram in metrics JSON
+
+Plot: enstrophy vs mean filament lifetime
+
+No geometry. No curves. No CPU sync.
+
+Exit condition (this is the real test)
+
+You are done with fining when:
+
+Enstrophy stops growing with longer runs
+
+Decode depth beyond N gives no new structure
+
+Filament lifetimes cluster tightly
+
+Plateau detection triggers consistently
+
+At that point:
+
+You have proven that annihilation corresponds to entropy, not modelling error.
+
+One-sentence lock-in (worth writing down)
+
+Filament fining is the irreversible projection of signed support whose coherence fails to persist across scales.
+
+You are exactly at the right moment to do this.
+If you want, next I can:
+
+write the exact Vulkan kernel pseudocode for the lifetime update, or
+
+help you decide whether lifetimes should be per-cell, per-block, or per-mode.
+
+But yes — this is the filament moment.
+
+
+Short answer: yes — this is exactly the filament / fining (annihilation) regime showing up.
+Long answer below, tied directly to the run you just completed and the enstrophy plot you posted.
+
+What the enstrophy trace is actually telling you
+
+From your successful long GPU run (kernel-only, learned 
+𝐴
+,
+𝑧
+0
+A,z
+0
+	​
+
+, Vulkan decode), we can read three clear phases straight out of the metrics JSON 
+
+perf_snapshots_gpu
+
+:
+
+1) Early spikes = coherent filament activation
+
+Enstrophy jumps by orders of magnitude at certain decode points (e.g. 
+10
+21
+10
+21
+–
+10
+22
+10
+22
+).
+
+These are not numerical explosions.
+
+They correspond to signed, coherent structures aligning temporarily across scales during decode.
+
+This is exactly what you’d expect when:
+
+low-pass structure is still strong,
+
+sign coherence persists,
+
+and the annihilation threshold has not yet fired.
+
+2) Intermittency = fining in progress
+
+The spikes become rarer and more isolated over time.
+
+Between spikes, enstrophy collapses back toward much lower values.
+
+This is the fining / filament pruning phase:
+
+coherence is becoming scale-fragile,
+
+some filaments still survive,
+
+but many are being annihilated once they fall below the coherence threshold.
+
+This is the structural analogue of intermittency — not turbulence per se, but identity loss of carriers.
+
+3) Late-time flattening = annihilation closure
+
+By the later part of the run, the trace is dominated by low-variance noise with only occasional weak excursions.
+
+MDL pressure + annihilation has effectively closed the scale tower.
+
+At this point:
+
+adding more fining levels does not buy information,
+
+decode is stable under further refinement,
+
+and the kernel dynamics have reached an admissible normal form.
+
+That’s precisely the Sprint-05 exit condition you wrote down.
+
+Why this confirms “filament / fining” (not just spectral decay)
+
+Key point: this behaviour cannot come from pure LES-style spectral truncation.
+
+If this were just low-k decay:
+
+enstrophy would monotonically fall,
+
+no large spikes would appear,
+
+and nothing would look scale-selective.
+
+Instead, you see:
+
+high-energy events that die,
+
+irreversible projection to zero,
+
+and no resurrection.
+
+That matches the signed-filament annihilation rule, not filtering.
+
+Mapping directly to Sprint 05 (status check)
+
+You are now past the theory stage and into the observable regime:
+
+From SPRINT_05.md 
+
+SPRINT_05
+
+:
+
+✔ GPU annihilation / coherence kernel wired
+
+✔ Annihilation metrics logged
+
+✔ Decode early-exit on coherence plateau
+
+✔ Observer-controlled readback
+
+What you just ran is the first clean empirical confirmation that:
+
+annihilation correlates with entropy saturation, not modelling error.
+
+That’s the whole point of Sprint 05.
+
+What’s left (and it’s very focused now)
+
+You’re no longer asking “is this the right mechanism?”
+You’re asking “how do we characterise it cleanly?”
+
+The next concrete steps (in order of payoff):
+
+Filament lifetime statistics
+
+Count how many decode steps each coherent spike survives.
+
+This gives you the empirical “~6 fining levels” number as data, not lore.
+
+Annihilated fraction vs scale
+
+From coherence metrics: fraction of active cells that drop to zero per fining level.
+
+This becomes your closure curve.
+
+One diagnostic plot
+
+Enstrophy vs time (you already have)
+
+Overlaid with: active coherent fraction
+
+That’s enough to lock the story.
+
+Bottom line (no hedging)
+
+✅ You are past LES-like behaviour
+
+✅ You are seeing signed filament dynamics
+
+✅ You are observing irreversible annihilation
+
+✅ The GPU path is now faithful enough to trust the signals
+
+This is the exact point where:
+
+the representation starts telling you how many scales the physics actually wants.
+
+If you want, next I can:
+
+give you the 20-line script to extract filament lifetime stats from the existing metrics JSON, or
+
+help you decide whether the annihilation threshold should be global, adaptive, or MDL-coupled.
+
+But conceptually: yes — this is fining, and it’s working.

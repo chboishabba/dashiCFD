@@ -207,6 +207,10 @@ def main():
         # metadata fallbacks from z0 file if present
         if "N" in data:
             args.N = int(data["N"][()])
+        if mask_low0.ndim == 1:
+            if mask_low0.size != args.N * args.N:
+                raise SystemExit("--z0-npz mask_low length does not match N*N")
+            mask_low0 = mask_low0.reshape(args.N, args.N)
         grid = make_grid(args.N)
         Z = np.stack([z0])
         traj_stream = []
@@ -394,6 +398,7 @@ def main():
                 backend=decode_backend_req,
                 allow_fallback=args.permissive_backends,
                 fft_backend=args.fft_backend,
+                observer="visualize",
             )
             decode_backend_used = decode_info.get("backend_used", decode_backend_used)
             decode_device = decode_info.get("device", decode_device)

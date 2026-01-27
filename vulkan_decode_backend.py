@@ -104,6 +104,13 @@ class VulkanDecodeBackend:
 
         self.partial_len = (self.total + 255) // 256
         _buf("partial_max", self.partial_len * 4)
+        _buf("max_reduce_a", self.partial_len * 4)
+        _buf("max_reduce_b", self.partial_len * 4)
+
+        self.metrics_gx = (self.N + 15) // 16
+        self.metrics_gy = (self.N + 15) // 16
+        self.metrics_groups = self.metrics_gx * self.metrics_gy
+        _buf("annihilation_metrics", self.metrics_groups * 4 * 4)
 
     def _build_pipelines(self):
         shaders = [
@@ -111,8 +118,10 @@ class VulkanDecodeBackend:
             ("smooth_x", "decode_smooth_x", 12),
             ("smooth_y", "decode_smooth_y", 12),
             ("absmax", "decode_absmax_reduce", 4),
-            ("threshold", "decode_threshold", 16),
+            ("reduce_max", "reduce_max", 4),
+            ("threshold", "decode_threshold_maxbuf", 12),
             ("majority", "decode_majority3x3", 4),
+            ("annihilate", "annihilate_coherence", 12),
         ]
         for name, shader_name, push_size in shaders:
             shader_path = resolve_shader(shader_name)
@@ -127,8 +136,10 @@ class VulkanDecodeBackend:
             "smooth_x": 2,
             "smooth_y": 2,
             "absmax": 3,
-            "threshold": 3,
+            "reduce_max": 2,
+            "threshold": 4,
             "majority": 2,
+            "annihilate": 4,
         }[name]
 
     def _make_pipeline(self, name: str, shader_path: Path, spv_path: Path, push_size: int, bindings: int) -> _Pipeline:
@@ -283,13 +294,17 @@ class VulkanDecodeBackend:
             None,
         )
         if push_bytes:
+            if hasattr(vk, "ffi"):
+                push_data = vk.ffi.new("char[]", bytes(push_bytes))
+            else:
+                push_data = bytearray(push_bytes) if isinstance(push_bytes, (bytes, bytearray)) else push_bytes
             vk.vkCmdPushConstants(
                 cmd,
                 pipeline.pipeline_layout,
                 vk.VK_SHADER_STAGE_COMPUTE_BIT,
                 0,
                 len(push_bytes),
-                push_bytes,
+                push_data,
             )
         gx, gy, gz = groups
         vk.vkCmdDispatch(cmd, gx, gy, gz)
@@ -297,6 +312,79 @@ class VulkanDecodeBackend:
 
         self._submit_and_wait(cmd)
         vk.vkDestroyDescriptorPool(device, descriptor_pool, None)
+        vk.vkFreeCommandBuffers(device, self.command_pool, 1, [cmd])
+
+    def _record_dispatch(self, cmd, name: str, buffers: Tuple[Tuple[object, int], ...], push_bytes: bytes, groups: Tuple[int, int, int]):
+        pipeline = self._pipelines[name]
+        device = self.handles.device
+        descriptor_pool, descriptor_set = self._allocate_descriptor_set(pipeline, buffers)
+
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipeline.pipeline_layout,
+            0,
+            1,
+            [descriptor_set],
+            0,
+            None,
+        )
+        if push_bytes:
+            if hasattr(vk, "ffi"):
+                push_data = vk.ffi.new("char[]", bytes(push_bytes))
+            else:
+                push_data = bytearray(push_bytes) if isinstance(push_bytes, (bytes, bytearray)) else push_bytes
+            vk.vkCmdPushConstants(
+                cmd,
+                pipeline.pipeline_layout,
+                vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                len(push_bytes),
+                push_data,
+            )
+        gx, gy, gz = groups
+        vk.vkCmdDispatch(cmd, gx, gy, gz)
+        return descriptor_pool
+
+    def _dispatch_batch(self, entries):
+        device = self.handles.device
+        cmd = self._alloc_command_buffer()
+        begin_info = vk.VkCommandBufferBeginInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        )
+        vk.vkBeginCommandBuffer(cmd, begin_info)
+
+        descriptor_pools = []
+        for idx, entry in enumerate(entries):
+            name, buffers, push_bytes, groups = entry
+            pool = self._record_dispatch(cmd, name, buffers, push_bytes, groups)
+            descriptor_pools.append(pool)
+            if idx < len(entries) - 1:
+                barrier = vk.VkMemoryBarrier(
+                    sType=vk.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                    dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
+                )
+                vk.vkCmdPipelineBarrier(
+                    cmd,
+                    vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    1,
+                    [barrier],
+                    0,
+                    None,
+                    0,
+                    None,
+                )
+
+        vk.vkEndCommandBuffer(cmd)
+        self._submit_and_wait(cmd)
+
+        for pool in descriptor_pools:
+            vk.vkDestroyDescriptorPool(device, pool, None)
         vk.vkFreeCommandBuffers(device, self.command_pool, 1, [cmd])
 
     # --------------------- public API ---------------------
@@ -307,6 +395,12 @@ class VulkanDecodeBackend:
         smooth_k: int | None = None,
         *,
         readback: bool = True,
+        metrics_readback: bool = False,
+        enable_annihilation: bool = False,
+        annihilation_iters: int = 0,
+        annihilation_plateau_eps: float = 0.01,
+        annihilation_plateau_window: int = 2,
+        coherence_min: float = 0.55,
     ) -> Tuple[np.ndarray | None, np.ndarray | None, Dict]:
         """Return (omega_lp, sign_mask, timings). If readback=False, omega_lp/sign are None."""
         if oh.dtype != np.complex64:
@@ -328,99 +422,191 @@ class VulkanDecodeBackend:
         N = self.N
         total = self.total
 
-        # Complex -> real (omega_lp)
+        # Complex -> real (omega_lp), smoothing, and thresholding in one batch
         scale = np.float32(1.0 / float(N * N))
         gx = (N + 15) // 16
         gy = (N + 15) // 16
-        t1 = time.perf_counter()
-        self._dispatch(
-            "c2r",
-            buffers=(
-                (plan.device_buffer, oh.nbytes),  # type: ignore[attr-defined]
-                (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
-            ),
-            push_bytes=struct.pack("<If", N, float(scale)),
-            groups=(gx, gy, 1),
+
+        entries = []
+        t_batch = time.perf_counter()
+        entries.append(
+            (
+                "c2r",
+                (
+                    (plan.device_buffer, oh.nbytes),  # type: ignore[attr-defined]
+                    (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
+                ),
+                struct.pack("<If", N, float(scale)),
+                (gx, gy, 1),
+            )
         )
-        timings["complex_to_real_ms"] = 1000 * (time.perf_counter() - t1)
 
         inv_k = np.float32(1.0 / float(max(1, k)))
-        # smooth x
-        t2 = time.perf_counter()
         push = struct.pack("<IIf", N, k, float(inv_k))
-        self._dispatch(
-            "smooth_x",
-            buffers=(
-                (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
-                (self._buffers["tmp"][0], self._buffers["tmp"][2]),
-            ),
-            push_bytes=push,
-            groups=(gx, gy, 1),
+        entries.append(
+            (
+                "smooth_x",
+                (
+                    (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
+                    (self._buffers["tmp"][0], self._buffers["tmp"][2]),
+                ),
+                push,
+                (gx, gy, 1),
+            )
         )
-        # smooth y (tmp -> base)
-        self._dispatch(
-            "smooth_y",
-            buffers=(
-                (self._buffers["tmp"][0], self._buffers["tmp"][2]),
-                (self._buffers["base"][0], self._buffers["base"][2]),
-            ),
-            push_bytes=push,
-            groups=(gx, gy, 1),
+        entries.append(
+            (
+                "smooth_y",
+                (
+                    (self._buffers["tmp"][0], self._buffers["tmp"][2]),
+                    (self._buffers["base"][0], self._buffers["base"][2]),
+                ),
+                push,
+                (gx, gy, 1),
+            )
         )
-        timings["smooth_ms"] = 1000 * (time.perf_counter() - t2)
 
         # absmax reduce into partial_max
-        t3 = time.perf_counter()
-        g_abs = (self.partial_len, 1, 1)
         push_abs = struct.pack("<I", total)
-        self._dispatch(
-            "absmax",
-            buffers=(
-                (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
-                (self._buffers["base"][0], self._buffers["base"][2]),
-                (self._buffers["partial_max"][0], self._buffers["partial_max"][2]),
-            ),
-            push_bytes=push_abs,
-            groups=g_abs,
+        entries.append(
+            (
+                "absmax",
+                (
+                    (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
+                    (self._buffers["base"][0], self._buffers["base"][2]),
+                    (self._buffers["partial_max"][0], self._buffers["partial_max"][2]),
+                ),
+                push_abs,
+                (self.partial_len, 1, 1),
+            )
         )
-        partial = _read_buffer(self.handles.device, self._buffers["partial_max"][1], (self.partial_len,), np.float32)
-        max_val = float(np.max(partial))
-        timings["absmax_ms"] = 1000 * (time.perf_counter() - t3)
 
-        inv_max = np.float32(1.0 / max(max_val, 1e-12))
-        t4 = time.perf_counter()
-        push_thr = struct.pack("<Ifff", total, float(tau), float(inv_max), 1e-12)
+        # reduce_max passes (partial_max -> max_reduce_*)
+        reduce_len = self.partial_len
+        in_buf = "partial_max"
+        out_buf = "max_reduce_a"
+        while reduce_len > 1:
+            out_len = (reduce_len + 255) // 256
+            entries.append(
+                (
+                    "reduce_max",
+                    (
+                        (self._buffers[in_buf][0], self._buffers[in_buf][2]),
+                        (self._buffers[out_buf][0], self._buffers[out_buf][2]),
+                    ),
+                    struct.pack("<I", reduce_len),
+                    (out_len, 1, 1),
+                )
+            )
+            reduce_len = out_len
+            in_buf, out_buf = out_buf, in_buf
+        max_buf_name = in_buf
+
+        # threshold (uses max buffer)
+        push_thr = struct.pack("<Iff", total, float(tau), 1e-12)
         g_thr = ((total + 255) // 256, 1, 1)
-        self._dispatch(
-            "threshold",
-            buffers=(
-                (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
-                (self._buffers["base"][0], self._buffers["base"][2]),
-                (self._buffers["sign_a"][0], self._buffers["sign_a"][2]),
-            ),
-            push_bytes=push_thr,
-            groups=g_thr,
+        entries.append(
+            (
+                "threshold",
+                (
+                    (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
+                    (self._buffers["base"][0], self._buffers["base"][2]),
+                    (self._buffers["sign_a"][0], self._buffers["sign_a"][2]),
+                    (self._buffers[max_buf_name][0], self._buffers[max_buf_name][2]),
+                ),
+                push_thr,
+                g_thr,
+            )
         )
-        timings["threshold_ms"] = 1000 * (time.perf_counter() - t4)
 
         # majority iterations
-        t5 = time.perf_counter()
         for it in range(self.majority_iters):
             in_name = "sign_a" if it % 2 == 0 else "sign_b"
             out_name = "sign_b" if it % 2 == 0 else "sign_a"
             push_maj = struct.pack("<I", N)
-            self._dispatch(
-                "majority",
-                buffers=(
-                    (self._buffers[in_name][0], self._buffers[in_name][2]),
-                    (self._buffers[out_name][0], self._buffers[out_name][2]),
-                ),
-                push_bytes=push_maj,
-                groups=(gx, gy, 1),
+            entries.append(
+                (
+                    "majority",
+                    (
+                        (self._buffers[in_name][0], self._buffers[in_name][2]),
+                        (self._buffers[out_name][0], self._buffers[out_name][2]),
+                    ),
+                    push_maj,
+                    (gx, gy, 1),
+                )
             )
-        timings["majority_ms"] = 1000 * (time.perf_counter() - t5)
+
+        self._dispatch_batch(entries)
+        batch_ms = 1000 * (time.perf_counter() - t_batch)
+        timings["decode_batch_ms"] = batch_ms
 
         final_sign_name = "sign_b" if (self.majority_iters % 2 == 1) else "sign_a"
+
+        if enable_annihilation and annihilation_iters > 0:
+            metrics_history = []
+            plateau_hits = 0
+            prev_active = None
+            for it in range(int(annihilation_iters)):
+                in_name = final_sign_name
+                out_name = "sign_b" if in_name == "sign_a" else "sign_a"
+                write_metrics = 1 if metrics_readback else 0
+                push_ann = struct.pack("<IfI", N, float(coherence_min), write_metrics)
+                self._dispatch(
+                    "annihilate",
+                    buffers=(
+                        (self._buffers[in_name][0], self._buffers[in_name][2]),
+                        (self._buffers[out_name][0], self._buffers[out_name][2]),
+                        (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
+                        (self._buffers["annihilation_metrics"][0], self._buffers["annihilation_metrics"][2]),
+                    ),
+                    push_bytes=push_ann,
+                    groups=(self.metrics_gx, self.metrics_gy, 1),
+                )
+                final_sign_name = out_name
+
+                if metrics_readback:
+                    partial = _read_buffer(
+                        self.handles.device,
+                        self._buffers["annihilation_metrics"][1],
+                        (self.metrics_groups, 4),
+                        np.float32,
+                    )
+                    counts_before = float(np.sum(partial[:, 0]))
+                    counts_after = float(np.sum(partial[:, 1]))
+                    sum_before = float(np.sum(partial[:, 2]))
+                    sum_after = float(np.sum(partial[:, 3]))
+                    mean_before = sum_before / max(counts_before, 1.0)
+                    mean_after = sum_after / max(counts_after, 1.0)
+                    metrics_history.append(
+                        {
+                            "iter": it,
+                            "active_before": counts_before,
+                            "active_after": counts_after,
+                            "mean_energy_before": mean_before,
+                            "mean_energy_after": mean_after,
+                        }
+                    )
+                    if prev_active is not None:
+                        rel_change = abs(counts_after - prev_active) / max(prev_active, 1.0)
+                        if rel_change <= annihilation_plateau_eps:
+                            plateau_hits += 1
+                        else:
+                            plateau_hits = 0
+                        if plateau_hits >= annihilation_plateau_window:
+                            break
+                    prev_active = counts_after
+
+            active_by_level = [h["active_after"] for h in metrics_history]
+            annihilation_level = len(active_by_level) - 1 if active_by_level else None
+            timings["coherence_metrics"] = {
+                "iters_requested": int(annihilation_iters),
+                "iters_run": len(metrics_history) if metrics_readback else int(annihilation_iters),
+                "plateau_eps": float(annihilation_plateau_eps),
+                "plateau_window": int(annihilation_plateau_window),
+                "annihilation_level": annihilation_level,
+                "active_cells_by_level": active_by_level,
+                "history": metrics_history,
+            }
 
         if not readback:
             timings["device_buffers"] = {

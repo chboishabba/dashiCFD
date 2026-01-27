@@ -29,6 +29,7 @@ from typing import Dict, Tuple
 import numpy as np
 
 from dashi_cfd_operator_v4 import (
+    DecodePolicy,
     ProxyConfig,
     decode_with_residual,
     encode_proxy,
@@ -66,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dtype", type=str, choices=["auto", "float32", "float64"], default="auto", help="dtype for operator math")
     p.add_argument("--mem-trace", action="store_true", help="use tracemalloc to record peak Python allocations")
     p.add_argument("--permissive-backends", action="store_true", help="allow GPU backend fallbacks to CPU instead of raising")
+    p.add_argument("--require-gpu", action="store_true", help="fail if GPU backends are unavailable or fall back to CPU")
     return p.parse_args()
 
 
@@ -274,13 +276,24 @@ def main():
         else:
             z_buf[1] = z_buf[0] @ A_op
 
-        z_host = to_cpu(z_buf[1])
-
-        if not np.isfinite(z_host).all():
-            nan_inf_hits += 1
-
         step_idx = t + 1
+        need_host = False
         if hash_every and (step_idx % hash_every == 0):
+            need_host = True
+        if decode_every and (step_idx % decode_every == 0):
+            need_host = True
+        if args.progress_every and (step_idx % args.progress_every == 0):
+            need_host = True
+
+        z_host = None
+        if need_host:
+            z_host = to_cpu(z_buf[1])
+            if not np.isfinite(z_host).all():
+                nan_inf_hits += 1
+
+        if hash_every and (step_idx % hash_every == 0):
+            if z_host is None:
+                z_host = to_cpu(z_buf[1])
             h = __import__("hashlib").blake2b(z_host.astype(np.float64).tobytes(), digest_size=16).hexdigest()
             hashes.append({"t": step_idx, "hash": h})
 
@@ -288,7 +301,7 @@ def main():
             t_dec = time.perf_counter()
             rng = np.random.default_rng(args.seed + step_idx)
             omega_hat, _, _, _, decode_info = decode_with_residual(
-                z_host.astype(np.float64),
+                (to_cpu(z_buf[1]) if z_host is None else z_host).astype(np.float64),
                 grid,
                 cfg,
                 mask_low,
@@ -298,6 +311,7 @@ def main():
                 backend=decode_backend_req,
                 allow_fallback=args.permissive_backends,
                 fft_backend=fft_active,
+                policy=DecodePolicy(readback=True, observer="metrics"),
             )
             decode_time += time.perf_counter() - t_dec
             decode_backend_used = decode_info.get("backend_used", decode_backend_used)
@@ -381,6 +395,12 @@ def main():
         print(f"[hash] {len(hashes)} hashes (every {hash_every} steps)")
     if nan_inf_hits:
         print(f"[warn] encountered non-finite values {nan_inf_hits} times during rollout")
+
+    if args.require_gpu:
+        if op_device != "gpu":
+            raise SystemExit("GPU required but rollout backend is not on GPU")
+        if decode_every and decode_backend_used != "vulkan":
+            raise SystemExit("GPU required but decode backend is not Vulkan")
 
     if args.metrics_json is not None:
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)

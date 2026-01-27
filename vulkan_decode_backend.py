@@ -4,7 +4,7 @@ from __future__ import annotations
 Vulkan decode backend (Stage 1–2): GPU low-pass decode via vkFFT + DASHI mask on GPU.
 
 This module keeps per-grid Vulkan handles, pipelines, and host-visible buffers so the
-decode path can run without CuPy/Torch. Residual synthesis remains CPU-side for now.
+decode path can run without Torch. Residual synthesis remains CPU-side for now.
 """
 
 import time
@@ -20,7 +20,7 @@ CORE_ROOT = Path(__file__).resolve().parent / "dashiCORE"
 if str(CORE_ROOT) not in sys.path:
     sys.path.insert(0, str(CORE_ROOT))
 
-from gpu_common_methods import compile_shader  # type: ignore
+from gpu_common_methods import compile_shader, resolve_shader, resolve_spv  # type: ignore
 from gpu_vkfft_adapter import VkFFTExecutor  # type: ignore
 from gpu_vulkan_dispatcher import (  # type: ignore
     HOST_VISIBLE_COHERENT,
@@ -107,17 +107,16 @@ class VulkanDecodeBackend:
 
     def _build_pipelines(self):
         shaders = [
-            ("c2r", "decode_complex_to_real.comp", 8),
-            ("smooth_x", "decode_smooth_x.comp", 12),
-            ("smooth_y", "decode_smooth_y.comp", 12),
-            ("absmax", "decode_absmax_reduce.comp", 4),
-            ("threshold", "decode_threshold.comp", 16),
-            ("majority", "decode_majority3x3.comp", 4),
+            ("c2r", "decode_complex_to_real", 8),
+            ("smooth_x", "decode_smooth_x", 12),
+            ("smooth_y", "decode_smooth_y", 12),
+            ("absmax", "decode_absmax_reduce", 4),
+            ("threshold", "decode_threshold", 16),
+            ("majority", "decode_majority3x3", 4),
         ]
-        root = Path(__file__).resolve().parent / "dashiCORE" / "gpu_shaders"
-        for name, fname, push_size in shaders:
-            shader_path = root / fname
-            spv_path = shader_path.with_suffix(".spv")
+        for name, shader_name, push_size in shaders:
+            shader_path = resolve_shader(shader_name)
+            spv_path = resolve_spv(shader_name)
             compile_shader(shader_path, spv_path)
             pipeline = self._make_pipeline(name, shader_path, spv_path, push_size, self._binding_count_for(name))
             self._pipelines[name] = pipeline
@@ -301,8 +300,15 @@ class VulkanDecodeBackend:
         vk.vkFreeCommandBuffers(device, self.command_pool, 1, [cmd])
 
     # --------------------- public API ---------------------
-    def decode_lowpass_mask(self, oh: np.ndarray, tau: float, smooth_k: int | None = None) -> Tuple[np.ndarray, np.ndarray, Dict]:
-        """Return (omega_lp, sign_mask, timings)."""
+    def decode_lowpass_mask(
+        self,
+        oh: np.ndarray,
+        tau: float,
+        smooth_k: int | None = None,
+        *,
+        readback: bool = True,
+    ) -> Tuple[np.ndarray | None, np.ndarray | None, Dict]:
+        """Return (omega_lp, sign_mask, timings). If readback=False, omega_lp/sign are None."""
         if oh.dtype != np.complex64:
             oh = oh.astype(np.complex64, copy=False)
         k = int(smooth_k) if smooth_k is not None else self.smooth_k
@@ -415,6 +421,13 @@ class VulkanDecodeBackend:
         timings["majority_ms"] = 1000 * (time.perf_counter() - t5)
 
         final_sign_name = "sign_b" if (self.majority_iters % 2 == 1) else "sign_a"
+
+        if not readback:
+            timings["device_buffers"] = {
+                "omega_lp": "omega_lp",
+                "sign": final_sign_name,
+            }
+            return None, None, timings
 
         omega_lp = _read_buffer(self.handles.device, self._buffers["omega_lp"][1], (N, N), np.float32)
         sign = _read_buffer(self.handles.device, self._buffers[final_sign_name][1], (N, N), np.int32)

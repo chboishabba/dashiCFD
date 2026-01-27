@@ -24,7 +24,7 @@ try:
     from dashi_core.atoms import VortexAtom2D  # optional atom support
 except Exception:
     VortexAtom2D = None
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from time import perf_counter
 
 
@@ -206,6 +206,13 @@ class ProxyConfig:
     resid_mid_cut: float = 12.0
     topk_mid: int = 128  # number of mid-band complex coeffs to preserve (phase-carrying)
 
+
+@dataclass
+class DecodePolicy:
+    readback: bool = False
+    allow_host_materialization: bool = False
+    observer: str | None = "none"
+
 def circular_kmask(KX, KY, k_cut: float):
     kmag = np.sqrt(KX*KX + KY*KY)
     return (kmag <= k_cut)
@@ -278,7 +285,9 @@ def decode_with_residual(
     backend: str = "cpu",
     allow_fallback: bool = False,
     fft_backend: str = "vkfft-vulkan",
+    policy: DecodePolicy | None = None,
 ):
+    """Decode proxy state into ω̂ with optional GPU-only mode via DecodePolicy."""
     dx, KX, KY, K2 = grid
     N = KX.shape[0]
     scale = float(N*N)
@@ -296,12 +305,14 @@ def decode_with_residual(
     oh = np.zeros((N, N), dtype=np.complex128)
     oh[mask_low] = lowk
 
+    policy = policy or DecodePolicy()
     decode_info = {
         "backend_requested": backend,
         "backend_used": "cpu",
         "device": "cpu",
         "flags": [],
         "timings": None,
+        "policy": asdict(policy),
     }
 
     omega_lp = None
@@ -319,17 +330,29 @@ def decode_with_residual(
                 fft_backend=fft_backend,
             )
             omega_lp_gpu, sign_gpu, timings_gpu = decoder.decode_lowpass_mask(
-                oh.astype(np.complex64), tau=cfg.dashi_tau, smooth_k=cfg.dashi_smooth_k
+                oh.astype(np.complex64),
+                tau=cfg.dashi_tau,
+                smooth_k=cfg.dashi_smooth_k,
+                readback=policy.readback,
             )
-            omega_lp = omega_lp_gpu.astype(np.float64)
-            s = sign_gpu.astype(np.int8)
-            m = (s != 0).astype(np.float64)
+            if policy.readback:
+                omega_lp = omega_lp_gpu.astype(np.float64)
+                s = sign_gpu.astype(np.int8)
+                m = (s != 0).astype(np.float64)
+            else:
+                decode_info["flags"].append("GPU_DECODE_NO_READBACK")
             decode_info.update(backend_used="vulkan", device="gpu", timings=timings_gpu)
         except Exception as exc:
             decode_info["flags"].append(f"GPU_DECODE_FALLBACK_CPU ({exc})")
             if not allow_fallback:
                 raise
             backend = "cpu"
+
+    if backend == "cpu" and not policy.readback and not policy.allow_host_materialization:
+        raise RuntimeError("decode_with_residual requires readback for CPU backend; set policy.readback=True")
+
+    if not policy.readback and backend == "vulkan":
+        return None, None, None, None, decode_info
 
     if omega_lp is None or m is None or s is None:
         omega_lp = ifft2(oh)
@@ -485,7 +508,15 @@ def main():
 
         if (t % decode_every) == 0 or prev_hat is None:
             rng = np.random.default_rng(residual_seed + 1000003*t)
-            omega_hat, omega_lp, m, s, _ = decode_with_residual(Zhat[t], grid, cfg, mask_low0, anchor_idx, rng)
+            omega_hat, omega_lp, m, s, _ = decode_with_residual(
+                Zhat[t],
+                grid,
+                cfg,
+                mask_low0,
+                anchor_idx,
+                rng,
+                policy=DecodePolicy(readback=True, observer="visualize"),
+            )
             prev_hat = omega_hat
         else:
             omega_hat = prev_hat

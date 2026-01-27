@@ -2,7 +2,7 @@
 Date: 2026-01-25
 
 ## Objective
-Stand up a real `decode_backend=vulkan` path that keeps decode hot-loop work on GPU (no CuPy/Torch), using vkFFT and Vulkan compute shaders, and that reports explicit device/timing/perf_flags so CPU fallbacks are impossible to misread.
+Stand up a real `decode_backend=vulkan` path that keeps decode hot-loop work on GPU (no Torch), using vkFFT and Vulkan compute shaders, and that reports explicit device/timing/perf_flags so CPU fallbacks are impossible to misread.
 
 ## Scope (this milestone)
 - Stage 1: GPU low-pass decode
@@ -22,7 +22,7 @@ Stand up a real `decode_backend=vulkan` path that keeps decode hot-loop work on 
 - Hashes stable per-backend; no “GPU lies” (i.e., backend tags match actual device dispatch).
 
 ## Constraints / Non-goals
-- No CuPy/Torch; Vulkan + vkFFT only.
+- No Torch; Vulkan + vkFFT only.
 - Prefer fp32 inside decode for speed; CPU path remains fp64 as reference.
 - Energy targeting for residual bands can be approximate in this milestone (log achieved values; no GPU reduction yet).
 - Not implementing residual synthesis GPU path in this milestone (Stage 3 later).

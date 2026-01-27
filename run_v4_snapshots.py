@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from datetime import datetime
+import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -64,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--kernel-only", action="store_true", help="skip LES entirely; requires --z0-npz")
     p.add_argument("--save-traj", type=Path, default=None, help="path to save computed trajectory npz (key 'traj')")
     p.add_argument("--timing", action="store_true", help="print timing for encode/learn/rollout/decode loop")
+    p.add_argument("--timing-detail", action="store_true", help="print detailed timing breakdown (simulation/encode/decode/plot/video)")
     p.add_argument("--dtype", type=str, choices=["auto", "float32", "float64"], default="auto", help="LES dtype (default auto: float64 when N>1024 else float32)")
     p.add_argument("--backend", type=str, choices=["cpu", "accelerated", "vulkan"], default="cpu", help="dashiCORE backend for ternary ops (if available)")
     p.add_argument("--fft-backend", type=str, choices=["numpy", "vkfft", "vkfft-opencl", "vkfft-vulkan"], default="numpy", help="FFT backend (vkFFT routes FFTs to GPU when available)")
@@ -75,6 +78,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hash-every", type=int, default=0, dest="hash_every", help="hash proxy state every K steps (0=off)")
     p.add_argument("--log-metrics", type=Path, default=None, dest="log_metrics", help="optional JSON file to record timing/hashes")
     return p.parse_args()
+
+
+def _get_vulkan_device_name(handles) -> str | None:
+    if handles is None:
+        return None
+    try:
+        import vulkan as vk  # type: ignore
+    except Exception:
+        return None
+    try:
+        props = vk.vkGetPhysicalDeviceProperties(handles.physical_device)
+        name = getattr(props, "deviceName", None)
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", "ignore").rstrip("\x00")
+        return str(name) if name else None
+    except Exception:
+        return None
 
 
 def simulate_les_trajectory_stream(
@@ -102,6 +122,8 @@ def simulate_les_trajectory_stream(
 
 def main():
     args = parse_args()
+    import time
+    t_wall_start = time.perf_counter()
     snap_ts = list(range(args.stride, args.steps + 1, args.stride))
     # dtype selection
     if args.dtype == "auto":
@@ -112,6 +134,8 @@ def main():
     # backend setup (optional)
     backend_selected = "cpu"
     fft_executor = None
+    fft_backend_used = "numpy"
+    vulkan_handles = None
     if args.backend != "cpu":
         try:
             import sys as _sys
@@ -154,6 +178,8 @@ def main():
                     print(f"[warn] vkFFT Vulkan handles unavailable ({e}); using NumPy FFT")
             fft_executor = VkFFTExecutor(handles=handles, fft_backend=args.fft_backend)
             set_fft_executor(fft_executor)
+            if handles is not None:
+                vulkan_handles = handles
         except Exception as e:
             print(f"[warn] fft-backend {args.fft_backend} unavailable ({e}); using NumPy FFT")
             set_fft_executor(None)
@@ -213,8 +239,9 @@ def main():
         omega_snap = {}
 
     # Encode trajectory
-    import time
     t_enc_start = time.perf_counter()
+    t_sim = 0.0
+    t_encode_proxy = 0.0
     if args.kernel_only:
         Z = np.stack([z0])
         t_enc = 0.0
@@ -222,12 +249,21 @@ def main():
         Z = []
         mask_low0 = None
         anchor_idx = None
-        for t, omega in traj_stream:
+        traj_iter = iter(traj_stream)
+        while True:
+            t_sim_start = time.perf_counter()
+            try:
+                t, omega = next(traj_iter)
+            except StopIteration:
+                break
+            t_sim += time.perf_counter() - t_sim_start
             if (not args.no_ground_truth) and (t in snap_ts):
                 omega_snap[t] = omega.copy()
             if traj_save is not None:
                 traj_save.append(omega.copy())
+            t_encode_start = time.perf_counter()
             z, mask_low, anchor_idx = encode_proxy(omega.astype(np.float64), grid, cfg, anchor_idx=anchor_idx)
+            t_encode_proxy += time.perf_counter() - t_encode_start
             if mask_low0 is None:
                 mask_low0 = mask_low
             Z.append(z)
@@ -280,11 +316,15 @@ def main():
                         if icd.is_file():
                             os.environ["VK_ICD_FILENAMES"] = str(icd)
                             break
-                vulkan_exec = VulkanGemvExecutor(D)
+                if vulkan_handles is not None:
+                    vulkan_exec = VulkanGemvExecutor(D, handles=vulkan_handles)
+                else:
+                    vulkan_exec = VulkanGemvExecutor(D)
                 op_backend = "vulkan"
                 op_device = "gpu"
                 A_op = A.astype(np.float32)
                 Z_dtype = np.float32
+                vulkan_handles = vulkan_exec.handles
             else:
                 if op_backend_req == "vulkan":
                     raise RuntimeError("Vulkan not available")
@@ -323,6 +363,8 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t_decode_total = 0.0
+    t_plot_total = 0.0
+    t_video_total = 0.0
     graphic_warned = False
     graphic_enabled = args.graphic_every > 0
     if graphic_enabled:
@@ -335,6 +377,7 @@ def main():
         else:
             plt.ion()
 
+    saved_pngs = []
     if (not args.no_decode) and len(snap_ts) > 0:
         for t in snap_ts:
             t_dec_start = time.perf_counter()
@@ -358,6 +401,7 @@ def main():
                 perf_flags.extend(decode_info["flags"])
             t_decode_total += time.perf_counter() - t_dec_start
 
+            t_plot_start = time.perf_counter()
             # Resolve figure size
             if args.pix_width is not None or args.pix_height is not None:
                 dpi = args.dpi
@@ -392,6 +436,8 @@ def main():
                 out_path = out_dir / f"{args.prefix}_t{t:04d}_compare.png"
 
             fig.savefig(out_path, dpi=dpi)
+            saved_pngs.append(out_path)
+            t_plot_total += time.perf_counter() - t_plot_start
             if graphic_enabled and (args.graphic_every > 0) and (len(snap_ts) > 0):
                 if (t // args.stride) % max(args.graphic_every // args.stride, 1) == 0:
                     fig.canvas.draw_idle()
@@ -401,9 +447,92 @@ def main():
             if args.progress_every:
                 print(f"[snapshot] done t={t}")
 
+    if saved_pngs:
+        timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
+        webm_name = f"{args.prefix}_snapshots_{timestamp}.webm"
+        webm_path = out_dir / webm_name
+        list_path = out_dir / f"{args.prefix}_frames_{timestamp}.txt"
+        try:
+            t_video_start = time.perf_counter()
+            with open(list_path, "w", encoding="utf-8") as f:
+                for path in saved_pngs:
+                    f.write(f"file '{path.as_posix()}'\n")
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-r",
+                "10",
+                "-c:v",
+                "libvpx-vp9",
+                "-pix_fmt",
+                "yuv420p",
+                str(webm_path),
+            ]
+            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            t_video_total += time.perf_counter() - t_video_start
+            for path in saved_pngs:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            list_path.unlink(missing_ok=True)
+            print(f"[webm] wrote {webm_path}")
+        except FileNotFoundError:
+            print("[warn] ffmpeg not found; leaving PNGs in place")
+            if list_path.exists():
+                list_path.unlink(missing_ok=True)
+        except subprocess.CalledProcessError:
+            print("[warn] ffmpeg failed; leaving PNGs in place")
+            if list_path.exists():
+                list_path.unlink(missing_ok=True)
+
+    if fft_executor is not None:
+        try:
+            plan_backends = {ctx.backend for ctx in fft_executor._plans.values()}
+            if plan_backends:
+                fft_backend_used = "+".join(sorted(plan_backends))
+            else:
+                fft_backend_used = "numpy"
+        except Exception:
+            fft_backend_used = args.fft_backend
+
+    device_name = _get_vulkan_device_name(vulkan_handles)
+    print(
+        "[summary] "
+        f"device={device_name or 'unknown'} "
+        f"ternary_backend={backend_selected} "
+        f"op_backend={op_backend}/{op_device} "
+        f"fft_backend={fft_backend_used} "
+        f"decode_backend={decode_backend_used}/{decode_device}"
+    )
+
     if args.timing:
         per_frame = t_decode_total / max(len(snap_ts), 1)
         print(f"[timing] encode={t_enc:.3f}s  learn={t_learn:.3f}s  rollout={t_roll:.3f}s  decode_total={t_decode_total:.3f}s  decode_per_snap={per_frame:.3f}s  backend={backend_selected} dtype={sim_dtype}")
+    if args.timing_detail:
+        t_wall = time.perf_counter() - t_wall_start
+        sim_rate = (args.steps / t_sim) if t_sim > 0 else 0.0
+        rollout_rate = (args.steps / t_roll) if t_roll > 0 else 0.0
+        decode_rate = (len(snap_ts) / t_decode_total) if t_decode_total > 0 else 0.0
+        print(
+            "[timing-detail] "
+            f"wall={t_wall:.3f}s "
+            f"sim={t_sim:.3f}s ({sim_rate:.2f} steps/s) "
+            f"encode={t_encode_proxy:.3f}s "
+            f"learn={t_learn:.3f}s "
+            f"rollout={t_roll:.3f}s ({rollout_rate:.2f} steps/s) "
+            f"decode={t_decode_total:.3f}s ({decode_rate:.2f} frames/s) "
+            f"plot={t_plot_total:.3f}s "
+            f"video={t_video_total:.3f}s"
+        )
+
+    t_wall = time.perf_counter() - t_wall_start
 
     if args.log_metrics is not None:
         import json
@@ -414,19 +543,25 @@ def main():
             "dt": args.dt,
             "backend": backend_selected,
             "fft_backend_requested": args.fft_backend,
-            "fft_backend_used": args.fft_backend,
+            "fft_backend_used": fft_backend_used,
             "dtype": str(sim_dtype),
             "op_backend": op_backend,
             "op_device": op_device,
             "decode_backend_requested": decode_backend_req,
             "decode_backend_used": decode_backend_used,
             "decode_device": decode_device,
+            "device_name": device_name or "unknown",
             "gpu_hotloop_active": bool(op_backend == "vulkan" and op_device == "gpu"),
             "encode_s": float(t_enc),
+            "sim_s": float(t_sim),
+            "encode_proxy_s": float(t_encode_proxy),
             "learn_s": float(t_learn),
             "rollout_s": float(t_roll),
             "decode_total_s": float(t_decode_total),
             "decode_per_snap_s": float(t_decode_total / max(len(snap_ts), 1)),
+            "plot_s": float(t_plot_total),
+            "video_s": float(t_video_total),
+            "wall_s": float(t_wall),
             "hash_every": args.hash_every,
             "hashes": hashes,
         }

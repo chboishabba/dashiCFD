@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import time
 
 import matplotlib.pyplot as plt
 
@@ -23,6 +24,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    run_ts = time.strftime("%Y-%m-%dT%H%M%S")
     fmt = args.format
     if fmt == "auto":
         fmt = "csv" if args.input.suffix.lower() == ".csv" else "json"
@@ -58,8 +60,13 @@ def main() -> None:
     plt.ylabel("Enstrophy")
     plt.title(args.title)
     plt.tight_layout()
-    plt.savefig(args.output, dpi=args.dpi)
-    print(f"wrote {args.output}")
+    out_path = args.output
+    if out_path.suffix:
+        out_path = out_path.with_name(f"{out_path.stem}_{run_ts}{out_path.suffix}")
+    else:
+        out_path = out_path.with_name(f"{out_path.name}_{run_ts}.png")
+    plt.savefig(out_path, dpi=args.dpi)
+    print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":

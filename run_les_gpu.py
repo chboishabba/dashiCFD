@@ -26,14 +26,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", type=Path, default=Path("outputs"), help="output directory")
     p.add_argument("--prefix", type=str, default="les_gpu", help="output filename prefix")
     p.add_argument("--fft-backend", type=str, default="vkfft-vulkan", help="FFT backend")
+    p.add_argument("--spectral-truncation", type=str, choices=["none", "exp"], default="none", help="spectral truncation filter (default: none)")
+    p.add_argument("--trunc-alpha", type=float, default=36.0, help="exp truncation alpha (default: 36)")
+    p.add_argument("--trunc-power", type=float, default=8.0, help="exp truncation power (default: 8)")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    run_ts = time.strftime("%Y-%m-%dT%H%M%S")
+    run_prefix = f"{args.prefix}_{run_ts}"
 
-    backend = VulkanLESBackend(args.N, dt=args.dt, nu0=args.nu0, Cs=args.Cs, fft_backend=args.fft_backend)
+    backend = VulkanLESBackend(
+        args.N,
+        dt=args.dt,
+        nu0=args.nu0,
+        Cs=args.Cs,
+        fft_backend=args.fft_backend,
+        spectral_truncation=args.spectral_truncation,
+        trunc_alpha=args.trunc_alpha,
+        trunc_power=args.trunc_power,
+    )
     omega0 = init_random_omega(args.N, seed=args.seed)
     backend.set_initial_omega(omega0)
 
@@ -54,14 +68,14 @@ def main() -> None:
             ax.set_title(f"omega t={step}")
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            out_path = args.out_dir / f"{args.prefix}_t{step:06d}.png"
+            out_path = args.out_dir / f"{run_prefix}_t{step:06d}.png"
             fig.savefig(out_path, dpi=140)
             plt.close(fig)
             print(f"[viz] wrote {out_path}")
 
     dt_total = time.perf_counter() - t0
     if enstrophy_log:
-        out_csv = args.out_dir / f"{args.prefix}_enstrophy.csv"
+        out_csv = args.out_dir / f"{run_prefix}_enstrophy.csv"
         with open(out_csv, "w", encoding="utf-8") as f:
             f.write("step,enstrophy\n")
             for step, val in enstrophy_log:

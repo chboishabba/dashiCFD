@@ -93,6 +93,9 @@ MPLBACKEND=Agg python run_les_gpu.py \
   --stats-every 200 \
   --progress-every 2000 \
   --viz-every 2000 \
+  --spectral-truncation exp \
+  --trunc-alpha 36 \
+  --trunc-power 8 \
   --out-dir outputs \
   --prefix les_gpu
 ```
@@ -128,6 +131,9 @@ python dashi_cli.py compare --interactive
 - `CORE_cfd_operator.py` @ 1024×1024, steps=120 (accelerated, fused mask) — legacy path not rerun; core fused path: 702.2 ms/step, enstrophy 0.00629, mask_mean 0.916. Final vorticity snapshot saved to `outputs/core_1024_final.png`.
 - `outputs/v4_t300_compare.png` — side-by-side ω true / decoded+residual / error at t=300 (N=64) generated from `dashi_cfd_operator_v4.py` pipeline.
 - `run_v4_snapshots.py` — CLI runner to save triptychs every stride: e.g., `MPLBACKEND=Agg python run_v4_snapshots.py --N 64 --steps 3000 --stride 300 --out-dir outputs --dpi 150 --figsize 14,5 --progress-every 100`. Supports `--pix-width/--pix-height` for exact pixels, `--traj-npz` to reuse a stored trajectory, `--save-traj` to write one, `--no-ground-truth` to skip ω_true/error panels (must pair with `--traj-npz`), `--timing` to print stage timings, `--dtype {auto,float32,float64}` (auto → float64 when N>1024), `--backend {cpu,accelerated,vulkan}` (best-effort; falls back to CPU if unavailable), and `--fft-backend {numpy,vkfft,vkfft-opencl,vkfft-vulkan}`. Vulkan path now tries vkFFT for FFTs (and falls back to NumPy if bindings/ICD missing). To force a specific ICD: `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json MPLBACKEND=Agg python run_v4_snapshots.py ... --backend vulkan --fft-backend vkfft-vulkan`. Kernel-only start: `--kernel-only --z0-npz path.npz` where the file contains `z` (proxy vector), `mask_low` (bool mask), `anchor_idx` (int indices for preserved mid-band coeffs).
+- `run_v4_snapshots.py` also accepts `--les-backend {cpu,gpu}` to generate ground-truth LES on GPU via `VulkanLESBackend` (still reads back each step for CPU-side encoding).
+- When using `--les-backend gpu`, you can enable spectral truncation with `--spectral-truncation exp --trunc-alpha 36 --trunc-power 8`.
+- `run_v4_snapshots.py` supports `--encode-backend gpu` to run the encode path on GPU; the first step bootstraps `anchor_idx` on CPU, then subsequent steps use GPU encode to reduce readback.
 - `dashiCORE/scripts/run_vulkan_core_mask_majority.py` — GPU smoke test for the `core_mask_majority` compute shader; validates Vulkan carrier dispatch vs CPU majority vote. Requires `VK_ICD_FILENAMES` and python-vulkan/glslc; accepts `--n` (elements per channel) and `--k` (channels).
 
 Recent GPU/vkFFT runs (user side):

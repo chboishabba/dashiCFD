@@ -58,6 +58,7 @@ class VulkanDecodeBackend:
         smooth_k: int,
         majority_iters: int = 8,
         fft_backend: str = "vkfft-vulkan",
+        timing_enabled: bool = True,
     ):
         if vk is None:
             raise RuntimeError(f"vulkan python package not available: {_VK_IMPORT_ERROR}")
@@ -66,6 +67,7 @@ class VulkanDecodeBackend:
         self.total = int(N * N)
         self.smooth_k = int(smooth_k)
         self.majority_iters = int(majority_iters)
+        self.timing_enabled = bool(timing_enabled)
         self.handles: VulkanHandles = create_vulkan_handles()
         self.command_pool = self._create_command_pool()
         self.fft_exec = VkFFTExecutor(handles=self.handles, fft_backend=fft_backend)
@@ -75,6 +77,12 @@ class VulkanDecodeBackend:
 
         self._buffers = {}
         self._alloc_buffers()
+        self._timing_active = False
+        self._timing_last: Dict[str, float] = {
+            "gpu_wait_ms": 0.0,
+            "fence_wait_ms": 0.0,
+            "queue_wait_ms": 0.0,
+        }
 
     # --------------------- setup ---------------------
     def _create_command_pool(self):
@@ -227,8 +235,36 @@ class VulkanDecodeBackend:
         fence_info = vk.VkFenceCreateInfo(sType=vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
         fence = vk.vkCreateFence(self.handles.device, fence_info, None)
         vk.vkQueueSubmit(self.handles.queue, 1, [submit_info], fence)
+        t0 = time.perf_counter()
         vk.vkWaitForFences(self.handles.device, 1, [fence], vk.VK_TRUE, 0xFFFFFFFFFFFFFFFF)
+        wait_ms = 1000 * (time.perf_counter() - t0)
+        if self._timing_active:
+            self._timing_last["fence_wait_ms"] += wait_ms
+            self._timing_last["gpu_wait_ms"] += wait_ms
         vk.vkDestroyFence(self.handles.device, fence, None)
+
+    def _queue_wait_idle(self) -> None:
+        t0 = time.perf_counter()
+        vk.vkQueueWaitIdle(self.handles.queue)
+        wait_ms = 1000 * (time.perf_counter() - t0)
+        if self._timing_active:
+            self._timing_last["queue_wait_ms"] += wait_ms
+            self._timing_last["gpu_wait_ms"] += wait_ms
+
+    def _timing_reset(self) -> None:
+        if not self.timing_enabled:
+            self._timing_active = False
+            return
+        self._timing_last = {
+            "gpu_wait_ms": 0.0,
+            "fence_wait_ms": 0.0,
+            "queue_wait_ms": 0.0,
+        }
+        self._timing_active = True
+
+    def _timing_finish(self) -> Dict[str, float]:
+        self._timing_active = False
+        return dict(self._timing_last) if self.timing_enabled else {}
 
     def _allocate_descriptor_set(self, pipeline: _Pipeline, buffers: Tuple[Tuple[object, int], ...]):
         device = self.handles.device
@@ -403,6 +439,7 @@ class VulkanDecodeBackend:
         coherence_min: float = 0.55,
     ) -> Tuple[np.ndarray | None, np.ndarray | None, Dict]:
         """Return (omega_lp, sign_mask, timings). If readback=False, omega_lp/sign are None."""
+        self._timing_reset()
         if oh.dtype != np.complex64:
             oh = oh.astype(np.complex64, copy=False)
         k = int(smooth_k) if smooth_k is not None else self.smooth_k
@@ -416,7 +453,7 @@ class VulkanDecodeBackend:
             raise RuntimeError("vkFFT plan unavailable for Vulkan decode")
         self.fft_exec._upload(oh, plan)  # type: ignore[attr-defined]
         self.fft_exec._run_vkfft(plan, inverse=True)  # type: ignore[attr-defined]
-        vk.vkQueueWaitIdle(self.handles.queue)
+        self._queue_wait_idle()
         timings["ifft_lp_ms"] = 1000 * (time.perf_counter() - t0)
 
         N = self.N
@@ -613,18 +650,33 @@ class VulkanDecodeBackend:
                 "omega_lp": "omega_lp",
                 "sign": final_sign_name,
             }
+            timings.update(self._timing_finish())
             return None, None, timings
 
         omega_lp = _read_buffer(self.handles.device, self._buffers["omega_lp"][1], (N, N), np.float32)
         sign = _read_buffer(self.handles.device, self._buffers[final_sign_name][1], (N, N), np.int32)
+        timings.update(self._timing_finish())
         return omega_lp, sign, timings
 
 
-_CACHE: Dict[Tuple[int, int, int, str], VulkanDecodeBackend] = {}
+_CACHE: Dict[Tuple[int, int, int, str, bool], VulkanDecodeBackend] = {}
 
 
-def get_vulkan_decoder(N: int, *, smooth_k: int, majority_iters: int = 8, fft_backend: str = "vkfft-vulkan") -> VulkanDecodeBackend:
-    key = (N, int(smooth_k), int(majority_iters), fft_backend)
+def get_vulkan_decoder(
+    N: int,
+    *,
+    smooth_k: int,
+    majority_iters: int = 8,
+    fft_backend: str = "vkfft-vulkan",
+    timing_enabled: bool = True,
+) -> VulkanDecodeBackend:
+    key = (N, int(smooth_k), int(majority_iters), fft_backend, bool(timing_enabled))
     if key not in _CACHE:
-        _CACHE[key] = VulkanDecodeBackend(N, smooth_k=smooth_k, majority_iters=majority_iters, fft_backend=fft_backend)
+        _CACHE[key] = VulkanDecodeBackend(
+            N,
+            smooth_k=smooth_k,
+            majority_iters=majority_iters,
+            fft_backend=fft_backend,
+            timing_enabled=timing_enabled,
+        )
     return _CACHE[key]

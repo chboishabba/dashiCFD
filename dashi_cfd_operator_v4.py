@@ -330,6 +330,7 @@ def decode_with_residual(
     fft_backend: str = "vkfft-vulkan",
     policy: DecodePolicy | None = None,
     observer: str | None = None,
+    timing_enabled: bool = True,
 ):
     """Decode proxy state into ω̂ with optional GPU-only mode via DecodePolicy."""
     dx, KX, KY, K2 = grid
@@ -375,6 +376,7 @@ def decode_with_residual(
                 smooth_k=cfg.dashi_smooth_k,
                 majority_iters=8,
                 fft_backend=fft_backend,
+                timing_enabled=timing_enabled,
             )
             omega_lp_gpu, sign_gpu, timings_gpu = decoder.decode_lowpass_mask(
                 oh.astype(np.complex64),

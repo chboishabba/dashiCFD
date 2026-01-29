@@ -180,6 +180,7 @@ def load_operator(args: argparse.Namespace, Z: np.ndarray | None, cfg: ProxyConf
 
 def main():
     args = parse_args()
+    run_ts = time.strftime("%Y-%m-%dT%H%M%S")
 
     z0, mask_low_flat, anchor_idx, meta = load_z0(args.z0_npz)
     N = int(meta["N"])
@@ -366,6 +367,7 @@ def main():
         perf_flags.append("GPU_DECODE_FELLBACK_CPU")
 
     metrics = {
+        "run_ts": run_ts,
         "N": N,
         "D": int(z0.shape[0]),
         "steps": steps,
@@ -415,10 +417,15 @@ def main():
             raise SystemExit("GPU required but decode backend is not Vulkan")
 
     if args.metrics_json is not None:
-        args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
-        with open(args.metrics_json, "w", encoding="utf-8") as f:
+        metrics_path = args.metrics_json
+        if metrics_path.suffix:
+            metrics_path = metrics_path.with_name(f"{metrics_path.stem}_{run_ts}{metrics_path.suffix}")
+        else:
+            metrics_path = metrics_path.with_name(f"{metrics_path.name}_{run_ts}.json")
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
-        print(f"[metrics] wrote {args.metrics_json}")
+        print(f"[metrics] wrote {metrics_path}")
 
 
 if __name__ == "__main__":

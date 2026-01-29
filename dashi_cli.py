@@ -78,6 +78,9 @@ def cmd_les(args: argparse.Namespace) -> int:
         args.out_dir = Path(_prompt("out-dir", str(args.out_dir)))
         args.prefix = _prompt("prefix", args.prefix)
         args.fft_backend = _prompt_choice("fft-backend", ["vkfft-vulkan", "vkfft-opencl", "vkfft", "numpy"], args.fft_backend)
+        args.spectral_truncation = _prompt_choice("spectral-truncation", ["none", "exp"], args.spectral_truncation)
+        args.trunc_alpha = _prompt_float("trunc-alpha", args.trunc_alpha)
+        args.trunc_power = _prompt_float("trunc-power", args.trunc_power)
         args.headless = _prompt_bool("Headless (MPLBACKEND=Agg)", args.headless)
 
     cmd = [
@@ -105,6 +108,12 @@ def cmd_les(args: argparse.Namespace) -> int:
         args.prefix,
         "--fft-backend",
         args.fft_backend,
+        "--spectral-truncation",
+        args.spectral_truncation,
+        "--trunc-alpha",
+        str(args.trunc_alpha),
+        "--trunc-power",
+        str(args.trunc_power),
     ]
     return _run(cmd, headless=args.headless)
 
@@ -227,6 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
     les.add_argument("--out-dir", type=Path, default=Path("outputs"))
     les.add_argument("--prefix", type=str, default="les_gpu")
     les.add_argument("--fft-backend", type=str, default="vkfft-vulkan")
+    les.add_argument("--spectral-truncation", type=str, default="none")
+    les.add_argument("--trunc-alpha", type=float, default=36.0)
+    les.add_argument("--trunc-power", type=float, default=8.0)
     les.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     les.set_defaults(func=cmd_les)
 

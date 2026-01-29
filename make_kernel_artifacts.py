@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -47,6 +48,7 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
+    run_ts = time.strftime("%Y-%m-%dT%H%M%S")
 
     cfg = ProxyConfig(
         k_cut=args.k_cut,
@@ -89,7 +91,7 @@ def main():
 
     out_prefix = args.out_prefix
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
-    base = out_prefix
+    base = Path(str(out_prefix) + f"_{run_ts}")
     z0_path = Path(str(base) + "_z0.npz")
     A_path = Path(str(base) + "_A.npz")
 

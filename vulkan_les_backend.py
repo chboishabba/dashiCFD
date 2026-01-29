@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import struct
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Tuple
@@ -51,7 +52,19 @@ class _Pipeline:
 class VulkanLESBackend:
     """GPU-only LES stepper with vkFFT + SPIR-V kernels."""
 
-    def __init__(self, N: int, *, dt: float, nu0: float, Cs: float, fft_backend: str = "vkfft-vulkan"):
+    def __init__(
+        self,
+        N: int,
+        *,
+        dt: float,
+        nu0: float,
+        Cs: float,
+        fft_backend: str = "vkfft-vulkan",
+        spectral_truncation: str = "none",
+        trunc_alpha: float = 36.0,
+        trunc_power: float = 8.0,
+        timing_enabled: bool = True,
+    ):
         if vk is None:
             raise RuntimeError(f"vulkan python package not available: {_VK_IMPORT_ERROR}")
         self.N = int(N)
@@ -59,6 +72,10 @@ class VulkanLESBackend:
         self.dt = float(dt)
         self.nu0 = float(nu0)
         self.Cs = float(Cs)
+        self.spectral_truncation = spectral_truncation
+        self.trunc_alpha = float(trunc_alpha)
+        self.trunc_power = float(trunc_power)
+        self.timing_enabled = bool(timing_enabled)
 
         self.handles: VulkanHandles = create_vulkan_handles()
         self.command_pool = self._create_command_pool()
@@ -73,6 +90,12 @@ class VulkanLESBackend:
         self._alloc_buffers()
         self._init_k_buffers()
         self._init_fft_plans()
+        self._timing_active = False
+        self._timing_last: Dict[str, float] = {
+            "gpu_wait_ms": 0.0,
+            "fence_wait_ms": 0.0,
+            "queue_wait_ms": 0.0,
+        }
 
     # --------------------- setup ---------------------
     def _create_command_pool(self):
@@ -82,6 +105,23 @@ class VulkanLESBackend:
             queueFamilyIndex=self.handles.queue_family_index,
         )
         return vk.vkCreateCommandPool(self.handles.device, pool_info, None)
+
+    def _timing_reset(self) -> None:
+        if not self.timing_enabled:
+            self._timing_active = False
+            return
+        self._timing_last = {
+            "gpu_wait_ms": 0.0,
+            "fence_wait_ms": 0.0,
+            "queue_wait_ms": 0.0,
+        }
+        self._timing_active = True
+
+    def _timing_finish(self) -> None:
+        self._timing_active = False
+
+    def get_last_timings(self) -> Dict[str, float]:
+        return dict(self._timing_last) if self.timing_enabled else {}
 
     def _alloc_buffers(self):
         device = self.handles.device
@@ -131,6 +171,7 @@ class VulkanLESBackend:
         kx = KX.astype(np.float32, copy=False).ravel()
         ky = KY.astype(np.float32, copy=False).ravel()
         k2 = K2.astype(np.float32, copy=False).ravel()
+        self.k_max = float(max(np.max(np.abs(kx)), np.max(np.abs(ky))))
         if k2.size:
             k2[0] = 0.0
         _write_buffer(self.handles.device, self._buffers["kx"][1], kx)
@@ -159,6 +200,7 @@ class VulkanLESBackend:
             ("poisson", "spectral_poisson", 4),
             ("spectral_vel", "spectral_vel", 4),
             ("spectral_laplacian", "spectral_laplacian", 4),
+            ("spectral_truncation", "spectral_truncation", 16),
             ("grad_omega", "grad_omega_fd", 8),
             ("advect", "advect", 4),
             ("smagorinsky", "smagorinsky_nu", 16),
@@ -182,6 +224,7 @@ class VulkanLESBackend:
             "poisson": 3,
             "spectral_vel": 5,
             "spectral_laplacian": 3,
+            "spectral_truncation": 3,
             "grad_omega": 3,
             "advect": 5,
             "smagorinsky": 3,
@@ -276,8 +319,21 @@ class VulkanLESBackend:
         fence_info = vk.VkFenceCreateInfo(sType=vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
         fence = vk.vkCreateFence(self.handles.device, fence_info, None)
         vk.vkQueueSubmit(self.handles.queue, 1, [submit_info], fence)
+        t0 = time.perf_counter()
         vk.vkWaitForFences(self.handles.device, 1, [fence], vk.VK_TRUE, 0xFFFFFFFFFFFFFFFF)
+        wait_ms = 1000 * (time.perf_counter() - t0)
+        if self._timing_active:
+            self._timing_last["fence_wait_ms"] += wait_ms
+            self._timing_last["gpu_wait_ms"] += wait_ms
         vk.vkDestroyFence(self.handles.device, fence, None)
+
+    def _queue_wait_idle(self) -> None:
+        t0 = time.perf_counter()
+        vk.vkQueueWaitIdle(self.handles.queue)
+        wait_ms = 1000 * (time.perf_counter() - t0)
+        if self._timing_active:
+            self._timing_last["queue_wait_ms"] += wait_ms
+            self._timing_last["gpu_wait_ms"] += wait_ms
 
     def _allocate_descriptor_set(self, pipeline: _Pipeline, buffers: Tuple[Tuple[object, int], ...]):
         device = self.handles.device
@@ -363,6 +419,79 @@ class VulkanLESBackend:
         vk.vkDestroyDescriptorPool(device, descriptor_pool, None)
         vk.vkFreeCommandBuffers(device, self.command_pool, 1, [cmd])
 
+    def _record_dispatch(self, cmd, name: str, buffers: Tuple[Tuple[object, int], ...], push_bytes: bytes, groups: Tuple[int, int, int]):
+        pipeline = self._pipelines[name]
+        device = self.handles.device
+        descriptor_pool, descriptor_set = self._allocate_descriptor_set(pipeline, buffers)
+
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipeline.pipeline_layout,
+            0,
+            1,
+            [descriptor_set],
+            0,
+            None,
+        )
+        if push_bytes:
+            if hasattr(vk, "ffi"):
+                push_data = vk.ffi.new("char[]", bytes(push_bytes))
+            else:
+                push_data = bytearray(push_bytes) if isinstance(push_bytes, (bytes, bytearray)) else push_bytes
+            vk.vkCmdPushConstants(
+                cmd,
+                pipeline.pipeline_layout,
+                vk.VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                len(push_bytes),
+                push_data,
+            )
+        gx, gy, gz = groups
+        vk.vkCmdDispatch(cmd, gx, gy, gz)
+        return descriptor_pool
+
+    def _dispatch_batch(self, entries):
+        device = self.handles.device
+        cmd = self._alloc_command_buffer()
+        begin_info = vk.VkCommandBufferBeginInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        )
+        vk.vkBeginCommandBuffer(cmd, begin_info)
+
+        descriptor_pools = []
+        for idx, entry in enumerate(entries):
+            name, buffers, push_bytes, groups = entry
+            pool = self._record_dispatch(cmd, name, buffers, push_bytes, groups)
+            descriptor_pools.append(pool)
+            if idx < len(entries) - 1:
+                barrier = vk.VkMemoryBarrier(
+                    sType=vk.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    srcAccessMask=vk.VK_ACCESS_SHADER_WRITE_BIT,
+                    dstAccessMask=vk.VK_ACCESS_SHADER_READ_BIT | vk.VK_ACCESS_SHADER_WRITE_BIT,
+                )
+                vk.vkCmdPipelineBarrier(
+                    cmd,
+                    vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    1,
+                    [barrier],
+                    0,
+                    None,
+                    0,
+                    None,
+                )
+
+        vk.vkEndCommandBuffer(cmd)
+        self._submit_and_wait(cmd)
+
+        for pool in descriptor_pools:
+            vk.vkDestroyDescriptorPool(device, pool, None)
+        vk.vkFreeCommandBuffers(device, self.command_pool, 1, [cmd])
+
     # --------------------- public API ---------------------
     def set_initial_omega(self, omega: np.ndarray) -> None:
         omega32 = np.asarray(omega, dtype=np.float32, order="C")
@@ -390,7 +519,25 @@ class VulkanLESBackend:
 
         # FFT omega_hat
         self.fft_omega._run_vkfft(self.omega_plan, inverse=False)  # type: ignore[attr-defined]
-        vk.vkQueueWaitIdle(self.handles.queue)
+        self._queue_wait_idle()
+
+        if self.spectral_truncation != "none":
+            self._dispatch(
+                "spectral_truncation",
+                buffers=(
+                    (self.omega_plan.device_buffer, self.omega_plan.bytes_len),  # type: ignore[attr-defined]
+                    (self._buffers["kx"][0], self._buffers["kx"][2]),
+                    (self._buffers["ky"][0], self._buffers["ky"][2]),
+                ),
+                push_bytes=struct.pack(
+                    "<fffI",
+                    float(self.k_max),
+                    float(self.trunc_alpha),
+                    float(self.trunc_power),
+                    total,
+                ),
+                groups=g1d,
+            )
 
         # psi_hat = -omega_hat / k2
         self._dispatch(
@@ -421,7 +568,7 @@ class VulkanLESBackend:
         # iFFT ux_hat, uy_hat
         self.fft_ux._run_vkfft(self.ux_plan, inverse=True)  # type: ignore[attr-defined]
         self.fft_uy._run_vkfft(self.uy_plan, inverse=True)  # type: ignore[attr-defined]
-        vk.vkQueueWaitIdle(self.handles.queue)
+        self._queue_wait_idle()
 
         # complex -> real (ux, uy)
         scale = np.float32(1.0 / float(N * N))
@@ -458,7 +605,7 @@ class VulkanLESBackend:
 
         # iFFT lap_hat -> lap
         self.fft_lap._run_vkfft(self.lap_plan, inverse=True)  # type: ignore[attr-defined]
-        vk.vkQueueWaitIdle(self.handles.queue)
+        self._queue_wait_idle()
         self._dispatch(
             "c2r",
             buffers=(
@@ -522,6 +669,7 @@ class VulkanLESBackend:
         )
 
     def step(self) -> None:
+        self._timing_reset()
         N = self.N
         gx = (N + 15) // 16
         gy = (N + 15) // 16
@@ -559,6 +707,7 @@ class VulkanLESBackend:
 
         # swap omega <- omega_tmp
         self._buffers["omega"], self._buffers["omega_tmp"] = self._buffers["omega_tmp"], self._buffers["omega"]
+        self._timing_finish()
 
     def read_omega(self) -> np.ndarray:
         return _read_buffer(self.handles.device, self._buffers["omega"][1], (self.N, self.N), np.float32)

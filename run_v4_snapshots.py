@@ -76,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--les-backend", type=str, choices=["cpu", "gpu"], default="cpu", help="LES backend for ground truth (default: cpu)")
     p.add_argument("--encode-backend", type=str, choices=["cpu", "gpu"], default="cpu", help="encode backend (default: cpu)")
     p.add_argument("--encode-batch", action="store_true", help="batch GPU encode dispatches (experimental)")
+    p.add_argument("--encode-batch-steps", type=int, default=1, help="encode batch size in timesteps (default: 1)")
     p.add_argument("--no-gpu-timing", action="store_true", help="disable GPU-side timing instrumentation")
     p.add_argument("--spectral-truncation", type=str, choices=["none", "exp"], default="none", help="spectral truncation filter for GPU LES (default: none)")
     p.add_argument("--trunc-alpha", type=float, default=36.0, help="exp truncation alpha (default: 36)")
@@ -228,7 +229,7 @@ def main():
                     handles = create_vulkan_handles()
                 except Exception as e:
                     print(f"[warn] vkFFT Vulkan handles unavailable ({e}); using NumPy FFT")
-            fft_executor = VkFFTExecutor(handles=handles, fft_backend=args.fft_backend)
+            fft_executor = VkFFTExecutor(handles=handles, fft_backend=args.fft_backend, timing_enabled=not args.no_gpu_timing)
             set_fft_executor(fft_executor)
             if handles is not None:
                 vulkan_handles = handles
@@ -348,6 +349,8 @@ def main():
     t_encode_proxy_cpu = 0.0
     t_sim_gpu_wait = 0.0
     t_encode_gpu_wait = 0.0
+    t_sim_gpu_time = 0.0
+    t_encode_gpu_time = 0.0
     if args.kernel_only:
         Z = np.stack([z0])
         t_enc = 0.0
@@ -356,6 +359,8 @@ def main():
         mask_low0 = None
         anchor_idx = None
         traj_iter = iter(traj_stream)
+        batch_steps = max(int(args.encode_batch_steps), 1)
+        batch_items = []
         t_enc_report_start = time.perf_counter()
         while True:
             t_sim_start = time.perf_counter()
@@ -363,50 +368,73 @@ def main():
             try:
                 item = next(traj_iter)
             except StopIteration:
-                break
+                item = None
             t_sim += time.perf_counter() - t_sim_start
             t_sim_cpu += time.process_time() - cpu_sim_start
-            sim_timings = None
-            if isinstance(item, tuple) and len(item) == 3:
-                t, omega, sim_timings = item
-            else:
-                t, omega = item
-            if sim_timings and "gpu_wait_ms" in sim_timings:
-                t_sim_gpu_wait += float(sim_timings["gpu_wait_ms"]) / 1000.0
-            if (not args.no_ground_truth) and (t in snap_ts):
-                omega_snap[t] = omega.copy()
-            if traj_save is not None:
-                traj_save.append(omega.copy())
-            t_encode_start = time.perf_counter()
-            cpu_encode_start = time.process_time()
-            if encoder is None:
-                z, mask_low, anchor_idx = encode_proxy(omega.astype(np.float64), grid, cfg, anchor_idx=anchor_idx)
-            else:
+            if item is not None:
+                sim_timings = None
+                if isinstance(item, tuple) and len(item) == 3:
+                    t, omega, sim_timings = item
+                else:
+                    t, omega = item
+                if sim_timings and "gpu_wait_ms" in sim_timings:
+                    t_sim_gpu_wait += float(sim_timings["gpu_wait_ms"]) / 1000.0
+                if sim_timings and "gpu_time_ms" in sim_timings:
+                    t_sim_gpu_time += float(sim_timings["gpu_time_ms"]) / 1000.0
+                if (not args.no_ground_truth) and (t in snap_ts):
+                    omega_snap[t] = omega.copy()
+                if traj_save is not None:
+                    traj_save.append(omega.copy())
+                batch_items.append((t, omega))
+
+            if item is None or len(batch_items) >= batch_steps:
+                if not batch_items:
+                    break
+                t_encode_start = time.perf_counter()
+                cpu_encode_start = time.process_time()
+                ts = [pair[0] for pair in batch_items]
+                omegas = np.stack([pair[1] for pair in batch_items], axis=0)
+                if encoder is None:
+                    z_list = []
+                    for omega in omegas:
+                        z, mask_low, anchor_idx = encode_proxy(omega.astype(np.float64), grid, cfg, anchor_idx=anchor_idx)
+                        z_list.append(z)
+                    z_batch = np.stack(z_list, axis=0)
+                else:
+                    if mask_low0 is None:
+                        mask_low0 = circular_kmask(grid[1], grid[2], cfg.k_cut)
+                    z_batch, anchor_idx_gpu = encoder.encode_proxy_batch(
+                        omegas,
+                        mask_low0,
+                        anchor_idx if anchor_idx is not None else None,
+                    )
+                    mask_low = mask_low0
+                    if anchor_idx is None and anchor_idx_gpu is not None:
+                        anchor_idx = anchor_idx_gpu.astype(np.int64)
+                        if args.progress_every:
+                            print("[encode] bootstrapped anchor_idx on GPU for encode")
+                t_encode_proxy += time.perf_counter() - t_encode_start
+                t_encode_proxy_cpu += time.process_time() - cpu_encode_start
+                if encoder is not None:
+                    enc_timings = encoder.get_last_timings()
+                    if "gpu_wait_ms" in enc_timings:
+                        t_encode_gpu_wait += float(enc_timings["gpu_wait_ms"]) / 1000.0
+                    if "gpu_time_ms" in enc_timings:
+                        t_encode_gpu_time += float(enc_timings["gpu_time_ms"]) / 1000.0
                 if mask_low0 is None:
-                    mask_low0 = circular_kmask(grid[1], grid[2], cfg.k_cut)
-                z, anchor_idx_gpu = encoder.encode_proxy(omega, mask_low0, anchor_idx if anchor_idx is not None else None)
-                mask_low = mask_low0
-                if anchor_idx is None and anchor_idx_gpu is not None:
-                    anchor_idx = anchor_idx_gpu.astype(np.int64)
-                    if args.progress_every:
-                        print("[encode] bootstrapped anchor_idx on GPU for encode")
-            t_encode_proxy += time.perf_counter() - t_encode_start
-            t_encode_proxy_cpu += time.process_time() - cpu_encode_start
-            if encoder is not None:
-                enc_timings = encoder.get_last_timings()
-                if "gpu_wait_ms" in enc_timings:
-                    t_encode_gpu_wait += float(enc_timings["gpu_wait_ms"]) / 1000.0
-            if mask_low0 is None:
-                mask_low0 = mask_low
-            Z.append(z)
-            if args.progress_every and (t % args.progress_every == 0):
-                elapsed = time.perf_counter() - t_enc_report_start
-                done = max(t, 1)
-                total = max(args.steps, 1)
-                rate = done / max(elapsed, 1e-9)
-                est_total = elapsed * (total / done)
-                eta = max(est_total - elapsed, 0.0)
-                print(f"[encode] t={t}/{args.steps}  elapsed={elapsed:.1f}s  est_total={est_total:.1f}s  eta={eta:.1f}s  steps/s={rate:.1f}")
+                    mask_low0 = mask_low
+                for idx, t in enumerate(ts):
+                    z = z_batch[idx]
+                    Z.append(z)
+                    if args.progress_every and (t % args.progress_every == 0):
+                        elapsed = time.perf_counter() - t_enc_report_start
+                        done = max(t, 1)
+                        total = max(args.steps, 1)
+                        rate = done / max(elapsed, 1e-9)
+                        est_total = elapsed * (total / done)
+                        eta = max(est_total - elapsed, 0.0)
+                        print(f"[encode] t={t}/{args.steps}  elapsed={elapsed:.1f}s  est_total={est_total:.1f}s  eta={eta:.1f}s  steps/s={rate:.1f}")
+                batch_items = []
         Z = np.stack(Z, axis=0)
         t_enc = time.perf_counter() - t_enc_start
         t_enc_cpu = time.process_time() - cpu_enc_start
@@ -436,6 +464,7 @@ def main():
     t_roll_start = time.perf_counter()
     t_roll_cpu_start = time.process_time()
     t_roll_gpu_wait = 0.0
+    t_roll_gpu_time = 0.0
     Z_arr = np.asarray(Z)
     D = Z_arr.shape[1]
 
@@ -497,6 +526,8 @@ def main():
             roll_timings = vulkan_exec.get_last_timings()
             if "gpu_wait_ms" in roll_timings:
                 t_roll_gpu_wait += float(roll_timings["gpu_wait_ms"]) / 1000.0
+            if "gpu_time_ms" in roll_timings:
+                t_roll_gpu_time += float(roll_timings["gpu_time_ms"]) / 1000.0
         else:
             Zhat[1] = Zhat[0] @ A_op
 
@@ -529,6 +560,7 @@ def main():
     t_plot_cpu = 0.0
     t_video_cpu = 0.0
     t_decode_gpu_wait = 0.0
+    t_decode_gpu_time = 0.0
     graphic_warned = False
     graphic_enabled = args.graphic_every > 0
     if graphic_enabled:
@@ -571,6 +603,8 @@ def main():
             timings = decode_info.get("timings") or {}
             if "gpu_wait_ms" in timings:
                 t_decode_gpu_wait += float(timings["gpu_wait_ms"]) / 1000.0
+            if "gpu_time_ms" in timings:
+                t_decode_gpu_time += float(timings["gpu_time_ms"]) / 1000.0
 
             t_plot_start = time.perf_counter()
             t_plot_cpu_start = time.process_time()
@@ -709,10 +743,14 @@ def main():
         def _pct(part: float, whole: float) -> float:
             return (100.0 * part / whole) if whole > 0 else 0.0
 
-        def _perf_line(name: str, wall: float, cpu: float, gpu_wait: float = 0.0) -> None:
+        def _perf_line(name: str, wall: float, cpu: float, gpu_wait: float = 0.0, gpu_time: float = 0.0) -> None:
             cpu = min(cpu, wall)
             wait = max(wall - cpu, 0.0)
             gpu_wait = max(min(gpu_wait, wall), 0.0)
+            gpu_time = max(min(gpu_time, wall), 0.0)
+            gpu_time_str = ""
+            if gpu_time > 0.0:
+                gpu_time_str = f" gpu={gpu_time:.3f}s ({_pct(gpu_time, wall):.1f}%)"
             print(
                 "[perf] "
                 f"{name} "
@@ -720,14 +758,15 @@ def main():
                 f"cpu={cpu:.3f}s ({_pct(cpu, wall):.1f}%) "
                 f"wait={wait:.3f}s ({_pct(wait, wall):.1f}%) "
                 f"gpu_wait={gpu_wait:.3f}s ({_pct(gpu_wait, wall):.1f}%)"
+                f"{gpu_time_str}"
             )
 
         _perf_line("overall", t_wall, cpu_wall)
-        _perf_line("sim", t_sim, t_sim_cpu, t_sim_gpu_wait)
-        _perf_line("encode", t_encode_proxy, t_encode_proxy_cpu, t_encode_gpu_wait)
+        _perf_line("sim", t_sim, t_sim_cpu, t_sim_gpu_wait, t_sim_gpu_time)
+        _perf_line("encode", t_encode_proxy, t_encode_proxy_cpu, t_encode_gpu_wait, t_encode_gpu_time)
         _perf_line("learn", t_learn, t_learn_cpu)
-        _perf_line("rollout", t_roll, t_roll_cpu, t_roll_gpu_wait)
-        _perf_line("decode", t_decode_total, t_decode_cpu, t_decode_gpu_wait)
+        _perf_line("rollout", t_roll, t_roll_cpu, t_roll_gpu_wait, t_roll_gpu_time)
+        _perf_line("decode", t_decode_total, t_decode_cpu, t_decode_gpu_wait, t_decode_gpu_time)
         _perf_line("plot", t_plot_total, t_plot_cpu)
         _perf_line("video", t_video_total, t_video_cpu)
 
@@ -762,17 +801,21 @@ def main():
             "sim_s": float(t_sim),
             "sim_cpu_s": float(t_sim_cpu),
             "sim_gpu_wait_s": float(t_sim_gpu_wait),
+            "sim_gpu_time_s": float(t_sim_gpu_time),
             "encode_proxy_s": float(t_encode_proxy),
             "encode_proxy_cpu_s": float(t_encode_proxy_cpu),
             "encode_gpu_wait_s": float(t_encode_gpu_wait),
+            "encode_gpu_time_s": float(t_encode_gpu_time),
             "learn_s": float(t_learn),
             "learn_cpu_s": float(t_learn_cpu),
             "rollout_s": float(t_roll),
             "rollout_cpu_s": float(t_roll_cpu),
             "rollout_gpu_wait_s": float(t_roll_gpu_wait),
+            "rollout_gpu_time_s": float(t_roll_gpu_time),
             "decode_total_s": float(t_decode_total),
             "decode_cpu_s": float(t_decode_cpu),
             "decode_gpu_wait_s": float(t_decode_gpu_wait),
+            "decode_gpu_time_s": float(t_decode_gpu_time),
             "decode_per_snap_s": float(t_decode_total / max(len(snap_ts), 1)),
             "plot_s": float(t_plot_total),
             "plot_cpu_s": float(t_plot_cpu),

@@ -6,7 +6,7 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import sys
@@ -76,7 +76,7 @@ class VulkanEncodeBackend:
 
         self.handles: VulkanHandles = create_vulkan_handles()
         self.command_pool = self._create_command_pool()
-        self.fft = VkFFTExecutor(handles=self.handles, fft_backend=fft_backend)
+        self.fft = VkFFTExecutor(handles=self.handles, fft_backend=fft_backend, timing_enabled=timing_enabled)
 
         self._pipelines: Dict[str, _Pipeline] = {}
         self._buffers = {}
@@ -95,10 +95,15 @@ class VulkanEncodeBackend:
         self._n_high = 0
         self._timing_active = False
         self._timing_last: Dict[str, float] = {
+            "gpu_time_ms": 0.0,
             "gpu_wait_ms": 0.0,
             "fence_wait_ms": 0.0,
             "queue_wait_ms": 0.0,
         }
+        self._timestamp_supported = False
+        self._timestamp_period = 0.0
+        self._timestamp_mask: Optional[int] = None
+        self._init_timestamp_support()
 
     # --------------------- setup ---------------------
     def _create_command_pool(self):
@@ -114,6 +119,7 @@ class VulkanEncodeBackend:
             self._timing_active = False
             return
         self._timing_last = {
+            "gpu_time_ms": 0.0,
             "gpu_wait_ms": 0.0,
             "fence_wait_ms": 0.0,
             "queue_wait_ms": 0.0,
@@ -125,6 +131,88 @@ class VulkanEncodeBackend:
 
     def get_last_timings(self) -> Dict[str, float]:
         return dict(self._timing_last) if self.timing_enabled else {}
+
+    def _init_timestamp_support(self) -> None:
+        if not self.timing_enabled:
+            return
+        try:
+            props = vk.vkGetPhysicalDeviceProperties(self.handles.physical_device)
+            self._timestamp_period = float(props.limits.timestampPeriod or 0.0)
+            qprops = vk.vkGetPhysicalDeviceQueueFamilyProperties(self.handles.physical_device)
+            valid_bits = int(qprops[self.handles.queue_family_index].timestampValidBits)
+            if self._timestamp_period > 0.0 and valid_bits > 0:
+                self._timestamp_supported = True
+                if valid_bits < 64:
+                    self._timestamp_mask = (1 << valid_bits) - 1
+        except Exception:
+            self._timestamp_supported = False
+            self._timestamp_period = 0.0
+            self._timestamp_mask = None
+
+    def _create_timestamp_query_pool(self):
+        if not (self.timing_enabled and self._timestamp_supported):
+            return None
+        info = vk.VkQueryPoolCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            queryType=vk.VK_QUERY_TYPE_TIMESTAMP,
+            queryCount=2,
+        )
+        return vk.vkCreateQueryPool(self.handles.device, info, None)
+
+    def _cmd_write_timestamps_begin(self, cmd, query_pool) -> None:
+        if query_pool is None:
+            return
+        if hasattr(vk, "vkCmdResetQueryPool"):
+            vk.vkCmdResetQueryPool(cmd, query_pool, 0, 2)
+        vk.vkCmdWriteTimestamp(cmd, vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0)
+
+    def _cmd_write_timestamps_end(self, cmd, query_pool) -> None:
+        if query_pool is None:
+            return
+        vk.vkCmdWriteTimestamp(cmd, vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1)
+
+    def _read_timestamp_ms(self, query_pool) -> float:
+        if query_pool is None or not self._timestamp_supported:
+            return 0.0
+        data_size = 16
+        stride = 8
+        flags = vk.VK_QUERY_RESULT_64_BIT | vk.VK_QUERY_RESULT_WAIT_BIT
+        if hasattr(vk, "ffi"):
+            data = vk.ffi.new("uint64_t[]", 2)
+            vk.vkGetQueryPoolResults(
+                self.handles.device,
+                query_pool,
+                0,
+                2,
+                data_size,
+                data,
+                stride,
+                flags,
+            )
+            t0, t1 = int(data[0]), int(data[1])
+        else:
+            import ctypes
+
+            data = (ctypes.c_uint64 * 2)()
+            vk.vkGetQueryPoolResults(
+                self.handles.device,
+                query_pool,
+                0,
+                2,
+                data_size,
+                data,
+                stride,
+                flags,
+            )
+            t0, t1 = int(data[0]), int(data[1])
+        if self._timestamp_mask is not None:
+            mask = self._timestamp_mask
+            t0 &= mask
+            t1 &= mask
+            delta = (t1 - t0) & mask
+        else:
+            delta = t1 - t0
+        return (delta * self._timestamp_period) / 1.0e6
 
     def _alloc_buffers(self):
         device = self.handles.device
@@ -314,7 +402,7 @@ class VulkanEncodeBackend:
         )
         return vk.vkAllocateCommandBuffers(self.handles.device, alloc_info)[0]
 
-    def _submit_and_wait(self, cmd):
+    def _submit_and_wait(self, cmd, query_pool=None):
         submit_info = vk.VkSubmitInfo(
             sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
             commandBufferCount=1,
@@ -330,6 +418,10 @@ class VulkanEncodeBackend:
             self._timing_last["fence_wait_ms"] += wait_ms
             self._timing_last["gpu_wait_ms"] += wait_ms
         vk.vkDestroyFence(self.handles.device, fence, None)
+        if query_pool is not None:
+            if self._timing_active:
+                self._timing_last["gpu_time_ms"] += self._read_timestamp_ms(query_pool)
+            vk.vkDestroyQueryPool(self.handles.device, query_pool, None)
 
     def _queue_wait_idle(self) -> None:
         t0 = time.perf_counter()
@@ -406,12 +498,14 @@ class VulkanEncodeBackend:
         pipeline = self._pipelines[name]
         device = self.handles.device
         cmd = self._alloc_command_buffer()
+        query_pool = self._create_timestamp_query_pool()
 
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         )
         vk.vkBeginCommandBuffer(cmd, begin_info)
+        self._cmd_write_timestamps_begin(cmd, query_pool)
         descriptor_pool, descriptor_set = self._allocate_descriptor_set(pipeline, buffers)
 
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
@@ -440,9 +534,10 @@ class VulkanEncodeBackend:
             )
         gx, gy, gz = groups
         vk.vkCmdDispatch(cmd, gx, gy, gz)
+        self._cmd_write_timestamps_end(cmd, query_pool)
         vk.vkEndCommandBuffer(cmd)
 
-        self._submit_and_wait(cmd)
+        self._submit_and_wait(cmd, query_pool=query_pool)
         vk.vkFreeCommandBuffers(device, self.command_pool, 1, [cmd])
 
     def _record_dispatch(
@@ -495,11 +590,13 @@ class VulkanEncodeBackend:
     def _dispatch_batch(self, entries):
         device = self.handles.device
         cmd = self._alloc_command_buffer()
+        query_pool = self._create_timestamp_query_pool()
         begin_info = vk.VkCommandBufferBeginInfo(
             sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         )
         vk.vkBeginCommandBuffer(cmd, begin_info)
+        self._cmd_write_timestamps_begin(cmd, query_pool)
 
         total_sets = max(len(entries), 1)
         total_descriptors = 0
@@ -542,8 +639,9 @@ class VulkanEncodeBackend:
                     None,
                 )
 
+        self._cmd_write_timestamps_end(cmd, query_pool)
         vk.vkEndCommandBuffer(cmd)
-        self._submit_and_wait(cmd)
+        self._submit_and_wait(cmd, query_pool=query_pool)
 
         vk.vkDestroyDescriptorPool(device, descriptor_pool, None)
         vk.vkFreeCommandBuffers(device, self.command_pool, 1, [cmd])
@@ -662,6 +760,9 @@ class VulkanEncodeBackend:
             groups=g1d,
         )
         self.fft._run_vkfft(self.plan, inverse=False)  # type: ignore[attr-defined]
+        if self._timing_active:
+            vkfft_ms = self.fft.get_last_timings().get("vkfft_gpu_time_ms", 0.0)
+            self._timing_last["gpu_time_ms"] += float(vkfft_ms)
         self._queue_wait_idle()
 
         # gather low-k coeffs
@@ -687,6 +788,9 @@ class VulkanEncodeBackend:
             groups=g1d,
         )
         self.fft._run_vkfft(self.plan, inverse=False)  # type: ignore[attr-defined]
+        if self._timing_active:
+            vkfft_ms = self.fft.get_last_timings().get("vkfft_gpu_time_ms", 0.0)
+            self._timing_last["gpu_time_ms"] += float(vkfft_ms)
         self._queue_wait_idle()
 
         if self.spectral_truncation != "none":
@@ -770,6 +874,31 @@ class VulkanEncodeBackend:
         z = np.concatenate([lowk_r, lowk_i, header, kept_r, kept_i])
         self._timing_finish()
         return z, (self._anchor_idx.copy() if self._anchor_idx is not None else None)
+
+    def encode_proxy_batch(
+        self,
+        omega_batch: np.ndarray,
+        mask_low: np.ndarray,
+        anchor_idx: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        omega_arr = np.asarray(omega_batch)
+        if omega_arr.ndim == 2:
+            z, anchor_idx = self.encode_proxy(omega_arr, mask_low, anchor_idx=anchor_idx)
+            return z[None, ...], anchor_idx
+        if omega_arr.ndim != 3:
+            raise ValueError(f"omega_batch must be 2D or 3D, got shape {omega_arr.shape}")
+        zs = []
+        timing_totals: Dict[str, float] = {}
+        for i in range(omega_arr.shape[0]):
+            z, anchor_idx = self.encode_proxy(omega_arr[i], mask_low, anchor_idx=anchor_idx)
+            zs.append(z)
+            if self.timing_enabled:
+                step_timings = self.get_last_timings()
+                for key, val in step_timings.items():
+                    timing_totals[key] = timing_totals.get(key, 0.0) + float(val)
+        if self.timing_enabled:
+            self._timing_last = timing_totals
+        return np.stack(zs, axis=0), anchor_idx
 
     # --------------------- internal utils ---------------------
     def _alloc_or_update_index_buffer(self, name: str, idx: np.ndarray) -> None:

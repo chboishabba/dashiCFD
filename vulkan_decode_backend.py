@@ -580,9 +580,11 @@ class VulkanDecodeBackend:
         total = self.total
 
         # Complex -> real (omega_lp), smoothing, and thresholding in one batch
-        scale = np.float32(1.0)
-        if self._ifft_needs_scale(plan):
-            scale = np.float32(1.0 / float(N * N))
+        # IMPORTANT: vkFFT Vulkan plan already normalizes inverse (NumPy semantics).
+        needs_scale = self._ifft_needs_scale(plan)
+        scale = np.float32(1.0 / float(N * N)) if needs_scale else np.float32(1.0)
+        if not needs_scale:
+            assert float(scale) == 1.0, "vkFFT Vulkan inverse is normalized; do not rescale"
         gx = (N + 15) // 16
         gy = (N + 15) // 16
 
@@ -709,6 +711,7 @@ class VulkanDecodeBackend:
                 in_name = final_sign_name
                 out_name = "sign_b" if in_name == "sign_a" else "sign_a"
                 write_metrics = 1 if metrics_readback else 0
+                # min_life now also relaxes coherence threshold for long-lived support in the shader.
                 push_ann = struct.pack("<IfII", N, float(coherence_min), int(filament_min_life), write_metrics)
                 if write_metrics:
                     _write_buffer(

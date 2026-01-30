@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hash-every", type=int, default=0, dest="hash_every", help="hash proxy state every K steps (0=off)")
     p.add_argument("--log-metrics", type=Path, default=None, dest="log_metrics", help="optional JSON file to record timing/hashes")
     p.add_argument("--check-decode-parity", action="store_true", help="compare CPU vs Vulkan decode outputs at snapshot steps")
+    p.add_argument("--parity-only", action="store_true", help="skip plots/GT and only report CPU↔Vulkan decode parity")
     return p.parse_args()
 
 
@@ -174,6 +175,9 @@ def simulate_les_trajectory_stream_gpu(
 
 def main():
     args = parse_args()
+    if args.parity_only:
+        args.check_decode_parity = True
+        args.no_ground_truth = True
     if args.check_decode_parity:
         if args.no_decode:
             raise SystemExit("--check-decode-parity requires decoding; remove --no-decode.")
@@ -312,7 +316,7 @@ def main():
         traj_save = None
         omega_snap = {t: traj[t] for t in snap_ts} if not args.no_ground_truth else {}
     else:
-        if args.no_ground_truth:
+        if args.no_ground_truth and not args.parity_only:
             raise SystemExit("--no-ground-truth requires --traj-npz to supply encoded data")
         dx, KX, KY, K2 = make_grid(args.N)
         grid = (dx, KX, KY, K2)
@@ -662,6 +666,19 @@ def main():
                         "cpu_backend_used": decode_info_cpu.get("backend_used"),
                     }
                 )
+
+            if args.parity_only:
+                if decode_parity:
+                    last = decode_parity[-1]
+                    lp_rel = last.get("omega_lp_rel_l2")
+                    mask_match = last.get("mask_match")
+                    lp_str = f" omega_lp_rel_l2={lp_rel:.4f}" if isinstance(lp_rel, float) else ""
+                    mask_str = f" mask_match={mask_match:.3f}" if isinstance(mask_match, float) else ""
+                    print(
+                        f"[parity] t={last['t']} rel_l2_cpu_gpu={last['rel_l2_cpu_gpu']:.4f} "
+                        f"corr_cpu_gpu={last['corr_cpu_gpu']:.4f}{lp_str}{mask_str}"
+                    )
+                continue
 
             t_plot_start = time.perf_counter()
             t_plot_cpu_start = time.process_time()

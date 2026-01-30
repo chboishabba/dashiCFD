@@ -822,6 +822,28 @@ class VulkanLESBackend:
     def read_omega(self) -> np.ndarray:
         return _read_buffer(self.handles.device, self._buffers["omega"][1], (self.N, self.N), np.float32)
 
+    def read_buffer(self, name: str, shape: Optional[Tuple[int, ...]] = None) -> np.ndarray:
+        if name not in self._buffers:
+            raise KeyError(f"unknown buffer {name}")
+        if shape is None:
+            shape = (self.N, self.N)
+        return _read_buffer(self.handles.device, self._buffers[name][1], shape, np.float32)
+
+    def debug_rhs_terms(self) -> Dict[str, np.ndarray]:
+        """Compute RHS terms for current omega and read back intermediate fields."""
+        self._compute_rhs("omega", "rhs1")
+        terms = {
+            "adv": self.read_buffer("adv"),
+            "lap": self.read_buffer("lap"),
+            "nu_t": self.read_buffer("nu_t"),
+            "rhs": self.read_buffer("rhs1"),
+            "ux": self.read_buffer("ux"),
+            "uy": self.read_buffer("uy"),
+            "dwdx": self.read_buffer("dwdx"),
+            "dwdy": self.read_buffer("dwdy"),
+        }
+        return terms
+
     def enstrophy(self) -> float:
         total = self.total
         g1 = (self.partial_len, 1, 1)

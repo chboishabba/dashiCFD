@@ -86,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-decode", action="store_true", help="skip decoding/plotting (throughput mode)")
     p.add_argument("--hash-every", type=int, default=0, dest="hash_every", help="hash proxy state every K steps (0=off)")
     p.add_argument("--log-metrics", type=Path, default=None, dest="log_metrics", help="optional JSON file to record timing/hashes")
+    p.add_argument("--check-decode-parity", action="store_true", help="compare CPU vs Vulkan decode outputs at snapshot steps")
     return p.parse_args()
 
 
@@ -173,6 +174,11 @@ def simulate_les_trajectory_stream_gpu(
 
 def main():
     args = parse_args()
+    if args.check_decode_parity:
+        if args.no_decode:
+            raise SystemExit("--check-decode-parity requires decoding; remove --no-decode.")
+        if args.decode_backend != "vulkan":
+            raise SystemExit("--check-decode-parity requires --decode-backend vulkan.")
     import time
     t_wall_start = time.perf_counter()
     cpu_wall_start = time.process_time()
@@ -574,13 +580,16 @@ def main():
             plt.ion()
 
     saved_pngs = []
+    snapshot_errors = []
+    decode_parity = []
     if (not args.no_decode) and len(snap_ts) > 0:
         for t in snap_ts:
             t_dec_start = time.perf_counter()
             t_dec_cpu_start = time.process_time()
             z_curr = Zhat_snap.get(t, to_cpu(Zhat[0]))
-            rng = np.random.default_rng(args.residual_seed + 1000003 * t)
-            omega_hat, _, _, _, decode_info = decode_with_residual(
+            residual_seed = args.residual_seed + 1000003 * t
+            rng = np.random.default_rng(residual_seed)
+            omega_hat, omega_lp_gpu, m_gpu, s_gpu, decode_info = decode_with_residual(
                 z_curr,
                 grid,
                 cfg,
@@ -606,6 +615,54 @@ def main():
             if "gpu_time_ms" in timings:
                 t_decode_gpu_time += float(timings["gpu_time_ms"]) / 1000.0
 
+            if args.check_decode_parity:
+                rng_cpu = np.random.default_rng(residual_seed)
+                omega_hat_cpu, omega_lp_cpu, m_cpu, s_cpu, decode_info_cpu = decode_with_residual(
+                    z_curr,
+                    grid,
+                    cfg,
+                    mask_low0,
+                    anchor_idx,
+                    rng_cpu,
+                    atoms=None,
+                    backend="cpu",
+                    allow_fallback=False,
+                    fft_backend=args.fft_backend,
+                    observer="visualize",
+                    timing_enabled=False,
+                )
+                err_cpu_gpu = omega_hat_cpu - omega_hat
+                denom_cpu = float(np.linalg.norm(omega_hat_cpu))
+                rel_l2_cpu_gpu = float(np.linalg.norm(err_cpu_gpu) / denom_cpu) if denom_cpu > 0 else float("inf")
+                corr_cpu_gpu = float(np.corrcoef(omega_hat_cpu.ravel(), omega_hat.ravel())[0, 1])
+                omega_lp_rel = None
+                omega_lp_corr = None
+                mask_match = None
+                support_cpu = None
+                support_gpu = None
+                if omega_lp_cpu is not None and omega_lp_gpu is not None:
+                    lp_err = omega_lp_cpu - omega_lp_gpu
+                    lp_denom = float(np.linalg.norm(omega_lp_cpu))
+                    omega_lp_rel = float(np.linalg.norm(lp_err) / lp_denom) if lp_denom > 0 else float("inf")
+                    omega_lp_corr = float(np.corrcoef(omega_lp_cpu.ravel(), omega_lp_gpu.ravel())[0, 1])
+                if m_cpu is not None and m_gpu is not None:
+                    support_cpu = float(np.mean(m_cpu))
+                    support_gpu = float(np.mean(m_gpu))
+                    mask_match = float(np.mean(m_cpu == m_gpu))
+                decode_parity.append(
+                    {
+                        "t": int(t),
+                        "rel_l2_cpu_gpu": rel_l2_cpu_gpu,
+                        "corr_cpu_gpu": corr_cpu_gpu,
+                        "omega_lp_rel_l2": omega_lp_rel,
+                        "omega_lp_corr": omega_lp_corr,
+                        "mask_match": mask_match,
+                        "support_frac_cpu": support_cpu,
+                        "support_frac_gpu": support_gpu,
+                        "cpu_backend_used": decode_info_cpu.get("backend_used"),
+                    }
+                )
+
             t_plot_start = time.perf_counter()
             t_plot_cpu_start = time.process_time()
             # Resolve figure size
@@ -628,13 +685,18 @@ def main():
                 out_path = out_dir / f"{run_prefix}_t{t:04d}_decoded.png"
             else:
                 omega_true = omega_snap[t]
+                err = omega_true - omega_hat
+                denom = float(np.linalg.norm(omega_true))
+                rel_l2 = float(np.linalg.norm(err) / denom) if denom > 0 else float("inf")
+                corr = float(np.corrcoef(omega_true.ravel(), omega_hat.ravel())[0, 1])
+                snapshot_errors.append({"t": int(t), "rel_l2": rel_l2, "corr": corr})
                 fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
                 titles = [
                     rf"$\omega$ true (t={t})$",
                     rf"$\hat{{\omega}}$ decoded+residual (t={t})$",
                     r"error $\omega-\hat{\omega}$",
                 ]
-                for ax, data, title in zip(axes, [omega_true, omega_hat, omega_true - omega_hat], titles):
+                for ax, data, title in zip(axes, [omega_true, omega_hat, err], titles):
                     im = ax.imshow(data, origin="lower", cmap="viridis")
                     ax.set_title(title)
                     ax.axis("off")
@@ -653,6 +715,25 @@ def main():
             print(f"saved {out_path}")
             if args.progress_every:
                 print(f"[snapshot] done t={t}")
+                if snapshot_errors:
+                    last = snapshot_errors[-1]
+                    print(f"[error] t={last['t']} rel_l2={last['rel_l2']:.4f} corr={last['corr']:.4f}")
+                if decode_parity:
+                    last = decode_parity[-1]
+                    lp_rel = last.get("omega_lp_rel_l2")
+                    mask_match = last.get("mask_match")
+                    lp_str = f" omega_lp_rel_l2={lp_rel:.4f}" if isinstance(lp_rel, float) else ""
+                    mask_str = f" mask_match={mask_match:.3f}" if isinstance(mask_match, float) else ""
+                    print(
+                        f"[parity] t={last['t']} rel_l2_cpu_gpu={last['rel_l2_cpu_gpu']:.4f} "
+                        f"corr_cpu_gpu={last['corr_cpu_gpu']:.4f}{lp_str}{mask_str}"
+                    )
+
+        if decode_backend_req == "vulkan" and decode_backend_used != "vulkan":
+            raise RuntimeError(
+                "Vulkan decode was requested, but GPU decode was not used "
+                f"(used={decode_backend_used}/{decode_device}). Refusing to fall back to CPU."
+            )
 
     if saved_pngs:
         webm_name = f"{run_prefix}_snapshots.webm"
@@ -825,6 +906,8 @@ def main():
             "cpu_wall_s": float(time.process_time() - cpu_wall_start),
             "hash_every": args.hash_every,
             "hashes": hashes,
+            "snapshot_errors": snapshot_errors,
+            "decode_parity": decode_parity,
         }
         if backend_selected != "cpu" and op_device == "cpu":
             metrics["perf_flags"] = ["GPU_ROLLOUT_NOT_IMPLEMENTED_VULKAN"]

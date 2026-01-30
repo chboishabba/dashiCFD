@@ -119,6 +119,18 @@ python dashi_cli.py plot --interactive
 python dashi_cli.py compare --interactive
 ```
 
+## Runners: which one is canonical?
+
+Use `run_v4_snapshots.py` as the canonical runner for end-to-end DASHI CFD experiments (LES → encode → learn → rollout → decode + plots/metrics). It is the only script that exercises the full v4 pipeline with consistent CLI flags for backends, FFT selection, timing, and optional GPU encode/decode.
+
+Other runners are targeted utilities:
+- `run_les_gpu.py` — GPU LES only (no DASHI encode/learn/rollout); use it for LES stability/perf sweeps or to generate standalone LES diagnostics.
+- `perf_kernel.py` — kernel-only (A/z) rollout + decode for performance/metrics; use it for backend micro-benchmarking and metrics-only runs.
+- `dashi_cfd_operator_v3.py` / `dashi_cfd_operator_v4.py` — pure Python module demos; keep for reference/quick sanity runs but do not treat them as the primary CLI.
+- `dashi_cli.py` — convenience wrapper that dispatches to the scripts above; `run_v4_snapshots.py` remains the canonical path under the hood for full runs.
+
+Rule of thumb: if you want a result you’ll carry forward or compare across backends, run `run_v4_snapshots.py`.
+
 ## Latest Run Results (2026-01-24, headless)
 - `dashi_cfd_operator_v3.py` — success; baseline 300 steps in 0.619s (2.06 ms/step). Final relL2 0.473, corr 0.881, ΔE −1.221e-03, ΔZ −1.077e-01.
 - `dashi_cfd_operator_v4.py` — success; baseline 300 steps in 0.627s (2.09 ms/step). Final relL2 0.648, corr 0.787, ΔE −2.38e-04, ΔZ −1.64e-02. Now preserves top-128 mid-band phases (indices fixed) and only synthesizes the remaining mid/high energy.

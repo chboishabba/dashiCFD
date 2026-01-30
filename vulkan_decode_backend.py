@@ -27,6 +27,7 @@ from gpu_vulkan_dispatcher import (  # type: ignore
     VulkanHandles,
     _create_buffer,
     _read_buffer,
+    _write_buffer,
     create_vulkan_handles,
 )
 
@@ -114,6 +115,8 @@ class VulkanDecodeBackend:
         _buf("base", real_bytes)
         _buf("sign_a", int_bytes)
         _buf("sign_b", int_bytes)
+        _buf("filament_lifetime", int_bytes)
+        _buf("filament_metrics", 16)
 
         self.partial_len = (self.total + 255) // 256
         _buf("partial_max", self.partial_len * 4)
@@ -122,8 +125,23 @@ class VulkanDecodeBackend:
 
         self.metrics_gx = (self.N + 15) // 16
         self.metrics_gy = (self.N + 15) // 16
-        self.metrics_groups = self.metrics_gx * self.metrics_gy
-        _buf("annihilation_metrics", self.metrics_groups * 4 * 4)
+        _write_buffer(self.handles.device, self._buffers["filament_lifetime"][1], np.zeros((self.total,), dtype=np.uint32))
+        _write_buffer(self.handles.device, self._buffers["filament_metrics"][1], np.zeros((4,), dtype=np.uint32))
+
+    def _ifft_needs_scale(self, plan) -> bool:
+        """Return True when we should apply 1/(N*N) after inverse FFT."""
+        backend = getattr(plan, "backend", None)
+        if backend != "vulkan":
+            return True
+        app = getattr(plan, "app", None)
+        if app is None:
+            return True
+        mod = type(app).__module__
+        name = type(app).__name__
+        if name == "VkFFTPlan" and mod.startswith("vkfft_vulkan_py"):
+            # vkfft_vulkan_py sets cfg.normalize=1, so inverse is already normalized.
+            return False
+        return True
 
     def _build_pipelines(self):
         shaders = [
@@ -134,7 +152,7 @@ class VulkanDecodeBackend:
             ("reduce_max", "reduce_max", 4),
             ("threshold", "decode_threshold_maxbuf", 12),
             ("majority", "decode_majority3x3", 4),
-            ("annihilate", "annihilate_coherence", 12),
+            ("annihilate", "annihilate_coherence", 16),
         ]
         for name, shader_name, push_size in shaders:
             shader_path = resolve_shader(shader_name)
@@ -535,6 +553,7 @@ class VulkanDecodeBackend:
         annihilation_plateau_eps: float = 0.01,
         annihilation_plateau_window: int = 2,
         coherence_min: float = 0.55,
+        filament_min_life: int = 1,
     ) -> Tuple[np.ndarray | None, np.ndarray | None, Dict]:
         """Return (omega_lp, sign_mask, timings). If readback=False, omega_lp/sign are None."""
         self._timing_reset()
@@ -561,7 +580,9 @@ class VulkanDecodeBackend:
         total = self.total
 
         # Complex -> real (omega_lp), smoothing, and thresholding in one batch
-        scale = np.float32(1.0 / float(N * N))
+        scale = np.float32(1.0)
+        if self._ifft_needs_scale(plan):
+            scale = np.float32(1.0 / float(N * N))
         gx = (N + 15) // 16
         gy = (N + 15) // 16
 
@@ -688,14 +709,20 @@ class VulkanDecodeBackend:
                 in_name = final_sign_name
                 out_name = "sign_b" if in_name == "sign_a" else "sign_a"
                 write_metrics = 1 if metrics_readback else 0
-                push_ann = struct.pack("<IfI", N, float(coherence_min), write_metrics)
+                push_ann = struct.pack("<IfII", N, float(coherence_min), int(filament_min_life), write_metrics)
+                if write_metrics:
+                    _write_buffer(
+                        self.handles.device,
+                        self._buffers["filament_metrics"][1],
+                        np.zeros((4,), dtype=np.uint32),
+                    )
                 self._dispatch(
                     "annihilate",
                     buffers=(
                         (self._buffers[in_name][0], self._buffers[in_name][2]),
                         (self._buffers[out_name][0], self._buffers[out_name][2]),
-                        (self._buffers["omega_lp"][0], self._buffers["omega_lp"][2]),
-                        (self._buffers["annihilation_metrics"][0], self._buffers["annihilation_metrics"][2]),
+                        (self._buffers["filament_lifetime"][0], self._buffers["filament_lifetime"][2]),
+                        (self._buffers["filament_metrics"][0], self._buffers["filament_metrics"][2]),
                     ),
                     push_bytes=push_ann,
                     groups=(self.metrics_gx, self.metrics_gy, 1),
@@ -703,38 +730,34 @@ class VulkanDecodeBackend:
                 final_sign_name = out_name
 
                 if metrics_readback:
-                    partial = _read_buffer(
+                    counts = _read_buffer(
                         self.handles.device,
-                        self._buffers["annihilation_metrics"][1],
-                        (self.metrics_groups, 4),
-                        np.float32,
+                        self._buffers["filament_metrics"][1],
+                        (4,),
+                        np.uint32,
                     )
-                    counts_before = float(np.sum(partial[:, 0]))
-                    counts_after = float(np.sum(partial[:, 1]))
-                    sum_before = float(np.sum(partial[:, 2]))
-                    sum_after = float(np.sum(partial[:, 3]))
-                    mean_before = sum_before / max(counts_before, 1.0)
-                    mean_after = sum_after / max(counts_after, 1.0)
+                    alive = int(counts[0])
+                    killed = int(counts[1])
+                    max_life = int(counts[2])
                     metrics_history.append(
                         {
                             "iter": it,
-                            "active_before": counts_before,
-                            "active_after": counts_after,
-                            "mean_energy_before": mean_before,
-                            "mean_energy_after": mean_after,
+                            "alive": alive,
+                            "killed": killed,
+                            "max_lifetime": max_life,
                         }
                     )
                     if prev_active is not None:
-                        rel_change = abs(counts_after - prev_active) / max(prev_active, 1.0)
+                        rel_change = abs(alive - prev_active) / max(prev_active, 1.0)
                         if rel_change <= annihilation_plateau_eps:
                             plateau_hits += 1
                         else:
                             plateau_hits = 0
                         if plateau_hits >= annihilation_plateau_window:
                             break
-                    prev_active = counts_after
+                    prev_active = alive
 
-            active_by_level = [h["active_after"] for h in metrics_history]
+            active_by_level = [h["alive"] for h in metrics_history]
             annihilation_level = len(active_by_level) - 1 if active_by_level else None
             timings["coherence_metrics"] = {
                 "iters_requested": int(annihilation_iters),
@@ -744,7 +767,10 @@ class VulkanDecodeBackend:
                 "annihilation_level": annihilation_level,
                 "active_cells_by_level": active_by_level,
                 "history": metrics_history,
+                "coherence_min": float(coherence_min),
+                "min_life": int(filament_min_life),
             }
+            timings["filament_metrics"] = timings["coherence_metrics"]
 
         if not readback:
             timings["device_buffers"] = {

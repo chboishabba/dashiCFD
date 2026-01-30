@@ -33,6 +33,7 @@ from vulkan_les_backend import VulkanLESBackend, init_random_omega
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--backend", choices=["cpu", "gpu"], default="cpu", help="truth backend (default: cpu)")
+    p.add_argument("--truth-tag", type=str, default=None, help="optional tag for output name (default: backend)")
     p.add_argument("--N", type=int, default=128, help="grid size (default: 128)")
     p.add_argument("--steps", type=int, default=2000, help="number of LES steps (default: 2000)")
     p.add_argument("--stride", type=int, default=200, help="snapshot stride (default: 200)")
@@ -49,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--progress-every", type=int, default=0, help="print progress every K steps (default: 0)")
     p.add_argument("--timing-detail", action="store_true", help="print timing summary")
     p.add_argument("--meta-only", action="store_true", help="only write metadata JSON, no NPZ")
+    p.add_argument("--update-manifest", action="store_true", help="update outputs/truth_manifest.json")
     return p.parse_args()
 
 
@@ -72,9 +74,10 @@ def _cpu_step(
 def main() -> None:
     args = parse_args()
     run_ts = datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    truth_tag = args.truth_tag if args.truth_tag is not None else args.backend
     out_prefix = args.out
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
-    base = Path(str(out_prefix) + f"_{run_ts}")
+    base = Path(str(out_prefix) + f"_{truth_tag}_{run_ts}")
     npz_path = base.with_suffix(".npz")
     meta_path = base.with_suffix(".json")
 
@@ -153,6 +156,7 @@ def main() -> None:
     meta: Dict[str, object] = {
         "run_ts": run_ts,
         "backend": args.backend,
+        "truth_tag": truth_tag,
         "N": int(args.N),
         "steps": int(args.steps),
         "stride": int(args.stride),
@@ -190,6 +194,26 @@ def main() -> None:
         wall = time.perf_counter() - t0_wall
         cpu = time.process_time() - t0_cpu
         print(f"[truth-timing] wall={wall:.3f}s cpu={cpu:.3f}s snapshots={len(snapshots)}")
+    if args.update_manifest:
+        manifest_path = out_prefix.parent / "truth_manifest.json"
+        manifest: Dict[str, object] = {}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except Exception:
+                manifest = {}
+        latest = dict(manifest.get("latest", {}))
+        entry = {
+            "npz": str(npz_path),
+            "meta": str(meta_path),
+            "backend": args.backend,
+            "truth_tag": truth_tag,
+            "run_ts": run_ts,
+        }
+        latest[truth_tag] = entry
+        manifest["latest"] = latest
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        print(f"[truth] updated {manifest_path}")
 
 
 if __name__ == "__main__":

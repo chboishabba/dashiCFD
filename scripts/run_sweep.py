@@ -32,9 +32,9 @@ from dashi_cfd_operator_v4 import (
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--truth", type=Path, required=True, help="truth NPZ (omega_snapshots + steps)")
-    p.add_argument("--z0", type=Path, required=True, help="z0 artifact NPZ")
-    p.add_argument("--A", type=Path, required=True, help="A artifact NPZ")
+    p.add_argument("--truth", type=str, required=True, help="truth NPZ (omega_snapshots + steps)")
+    p.add_argument("--z0", type=str, nargs="+", required=True, help="z0 artifact NPZ (supports globs)")
+    p.add_argument("--A", type=str, nargs="+", required=True, help="A artifact NPZ (supports globs)")
     p.add_argument("--noise-levels", type=str, default="0.0", help="comma-separated z0 noise levels (fraction of z0 std)")
     p.add_argument("--decode-backend", choices=["cpu", "vulkan"], default="cpu", help="decode backend (default: cpu)")
     p.add_argument("--fft-backend", type=str, default="vkfft-vulkan", help="FFT backend for GPU decode")
@@ -75,7 +75,18 @@ def main() -> None:
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
     out_path = Path(str(out_prefix) + f"_{run_ts}.json")
 
-    def _resolve_single(path: Path) -> Path:
+    def _resolve_single(spec: str) -> Path:
+        if spec.startswith("latest:"):
+            tag = spec.split(":", 1)[1].strip()
+            manifest_path = Path("outputs/truth_manifest.json")
+            if not manifest_path.exists():
+                raise FileNotFoundError(f"{manifest_path} not found for {spec}")
+            manifest = json.loads(manifest_path.read_text())
+            entry = manifest.get("latest", {}).get(tag)
+            if not entry or "npz" not in entry:
+                raise FileNotFoundError(f"{spec} not found in {manifest_path}")
+            return Path(entry["npz"])
+        path = Path(spec)
         if path.exists():
             return path
         matches = sorted(Path(path.parent).glob(path.name))
@@ -83,9 +94,32 @@ def main() -> None:
             return matches[0]
         raise FileNotFoundError(f"{path} (matches: {len(matches)})")
 
+    def _resolve_many(specs: List[str]) -> List[Path]:
+        resolved: List[Path] = []
+        for spec in specs:
+            if spec.startswith("latest:"):
+                resolved.append(_resolve_single(spec))
+                continue
+            path = Path(spec)
+            if path.exists():
+                resolved.append(path)
+                continue
+            matches = sorted(Path(path.parent).glob(path.name))
+            resolved.extend(matches)
+        return resolved
+
+    def _pick_latest(paths: List[Path], label: str) -> Path:
+        if not paths:
+            raise FileNotFoundError(f"no {label} files found")
+        if len(paths) == 1:
+            return paths[0]
+        latest = max(paths, key=lambda p: p.stat().st_mtime)
+        print(f"[sweep] {label} matched {len(paths)} files; using latest: {latest}")
+        return latest
+
     truth_path = _resolve_single(args.truth)
-    z0_path = _resolve_single(args.z0)
-    A_path = _resolve_single(args.A)
+    z0_path = _pick_latest(_resolve_many(args.z0), "z0")
+    A_path = _pick_latest(_resolve_many(args.A), "A")
 
     truth = dict(np.load(truth_path, allow_pickle=True))
     omega_truth = truth["omega_snapshots"]
@@ -182,7 +216,9 @@ def main() -> None:
 
     payload = {
         "run_ts": run_ts,
-        "truth": str(args.truth),
+        "truth": str(truth_path),
+        "truth_backend": None,
+        "truth_tag": None,
         "z0": str(args.z0),
         "A": str(args.A),
         "decode_backend": args.decode_backend,
@@ -192,6 +228,13 @@ def main() -> None:
         "snapshots": len(truth_steps),
         "runs": runs,
     }
+    if "meta_json" in truth:
+        try:
+            truth_meta = json.loads(str(truth["meta_json"]))
+            payload["truth_backend"] = truth_meta.get("backend")
+            payload["truth_tag"] = truth_meta.get("truth_tag")
+        except Exception:
+            pass
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     print(f"[sweep] wrote {out_path}")

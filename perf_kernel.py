@@ -2,17 +2,25 @@
 """
 Kernel-only performance + stability harness for the DASHI proxy operator.
 
-Usage (throughput mode):
-    python perf_kernel.py \
-      --z0-npz outputs/z0.npz \
-      --A-npz outputs/A.npz \
-      --steps 300000 \
-      --no-decode \
-      --hash-every 1000 \
-      --metrics-json outputs/perf_kernel.json
-
 This treats the learned operator A as the dynamical system and benchmarks
 z_{t+1} = z_t @ A with optional decoded sanity snapshots.
+
+Usage (throughput mode):
+  python perf_kernel.py \
+    --z0-npz outputs/z0.npz \
+    --A-npz outputs/A.npz \
+    --steps 300000 \
+    --no-decode \
+    --hash-every 1000 \
+    --metrics-json outputs/perf_kernel.json
+
+Usage (metrics snapshots):
+  python perf_kernel.py \
+    --z0-npz outputs/kernel_N128_z0.npz \
+    --A-npz outputs/kernel_N128_A.npz \
+    --steps 20000 \
+    --decode-every 200 \
+    --observer snapshots
 """
 
 from __future__ import annotations
@@ -41,7 +49,10 @@ from dashi_cfd_operator_v4 import (
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--z0-npz", type=Path, required=True, help="npz with z, mask_low (flat), anchor_idx, metadata")
     p.add_argument("--A-npz", type=Path, default=None, dest="A_npz", help="npz containing operator under key 'A'")
     p.add_argument("--fit-A-from-traj", type=Path, dest="fit_A_traj", default=None, help="npz with key 'traj' to learn A (ignores --A-npz)")

@@ -1,6 +1,10 @@
 # dashiCFD
 
-CFD + DASHI experiments for 2D vorticity rollouts, ternary structural codecs, and SUSY gauge scans. Assets in the repo are mostly matplotlib outputs; simulations run in pure NumPy.
+CFD + DASHI experiments for 2D vorticity rollouts, ternary structural codecs, and SUSY gauge scans. Assets in the repo are mostly matplotlib outputs; simulations run in pure NumPy with optional Vulkan/vkFFT acceleration.
+
+## Docs
+- `docs/overview.md` — quickstart, runner map, and backend notes.
+- `docs/signed_filament_annihilation.md` — operator semantics for signed filaments.
 
 ## How to Run
 - Use Python 3.10+ with `numpy` and `matplotlib`; set `MPLBACKEND=Agg` for headless environments.
@@ -10,6 +14,9 @@ CFD + DASHI experiments for 2D vorticity rollouts, ternary structural codecs, an
   - `MPLBACKEND=Agg python dashi_les_vorticity_codec_v2.py`
   - `MPLBACKEND=Agg python vortex_tester_mdl.py`
   - `MPLBACKEND=Agg CORE_BACKEND=cpu python CORE_cfd_operator.py`
+  - `MPLBACKEND=Agg python run_v4_snapshots.py --N 64 --steps 3000 --stride 300 --out-dir outputs`
+  - `MPLBACKEND=Agg python perf_kernel.py --z0-npz outputs/kernel_N128_z0.npz --A-npz outputs/kernel_N128_A.npz --steps 20000 --decode-every 200`
+  - `MPLBACKEND=Agg python run_les_gpu.py --N 512 --steps 20000 --stats-every 200 --progress-every 2000`
 
 ## Vulkan GPU commands
 
@@ -131,7 +138,7 @@ Other runners are targeted utilities:
 
 Rule of thumb: if you want a result you’ll carry forward or compare across backends, run `run_v4_snapshots.py`.
 
-## Latest Run Results (2026-01-24, headless)
+## Latest Run Results (last recorded 2026-01-24, headless)
 - `dashi_cfd_operator_v3.py` — success; baseline 300 steps in 0.619s (2.06 ms/step). Final relL2 0.473, corr 0.881, ΔE −1.221e-03, ΔZ −1.077e-01.
 - `dashi_cfd_operator_v4.py` — success; baseline 300 steps in 0.627s (2.09 ms/step). Final relL2 0.648, corr 0.787, ΔE −2.38e-04, ΔZ −1.64e-02. Now preserves top-128 mid-band phases (indices fixed) and only synthesizes the remaining mid/high energy.
 - `dashi_les_vorticity_codec.py` — success; codec stats: compression_ratio 0.714, relL2 0.03997, corr 0.9992, support_cells 4078.
@@ -143,10 +150,13 @@ Rule of thumb: if you want a result you’ll carry forward or compare across bac
 - `CORE_cfd_operator.py` @ 1024×1024, steps=120 (accelerated, fused mask) — legacy path not rerun; core fused path: 702.2 ms/step, enstrophy 0.00629, mask_mean 0.916. Final vorticity snapshot saved to `outputs/core_1024_final.png`.
 - `outputs/v4_t300_compare.png` — side-by-side ω true / decoded+residual / error at t=300 (N=64) generated from `dashi_cfd_operator_v4.py` pipeline.
 - `run_v4_snapshots.py` — CLI runner to save triptychs every stride: e.g., `MPLBACKEND=Agg python run_v4_snapshots.py --N 64 --steps 3000 --stride 300 --out-dir outputs --dpi 150 --figsize 14,5 --progress-every 100`. Supports `--pix-width/--pix-height` for exact pixels, `--traj-npz` to reuse a stored trajectory, `--save-traj` to write one, `--no-ground-truth` to skip ω_true/error panels (must pair with `--traj-npz`), `--timing` to print stage timings, `--dtype {auto,float32,float64}` (auto → float64 when N>1024), `--backend {cpu,accelerated,vulkan}` (best-effort; falls back to CPU if unavailable), and `--fft-backend {numpy,vkfft,vkfft-opencl,vkfft-vulkan}`. Vulkan path now tries vkFFT for FFTs (and falls back to NumPy if bindings/ICD missing). To force a specific ICD: `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json MPLBACKEND=Agg python run_v4_snapshots.py ... --backend vulkan --fft-backend vkfft-vulkan`. Kernel-only start: `--kernel-only --z0-npz path.npz` where the file contains `z` (proxy vector), `mask_low` (bool mask), `anchor_idx` (int indices for preserved mid-band coeffs).
+- `run_v4_snapshots.py` decode parity options: `--check-decode-parity` compares CPU vs Vulkan decode at snapshot steps and logs rel-L2/corr (plus low-pass/mask parity). `--parity-only` runs the parity check without plotting or ground truth; it implies `--check-decode-parity` and `--no-ground-truth`. When `--decode-backend vulkan` is requested, the runner now fails fast if GPU decode was not used (no silent CPU fallback).
+- Vulkan decode semantics: annihilation now incorporates lifetime when deciding survival (long-lived support gets a slightly relaxed coherence threshold). This is a behavioral choice; rebuild SPIR-V after editing shaders via `python dashiCORE/scripts/compile_spv.py`.
 - `run_v4_snapshots.py` also accepts `--les-backend {cpu,gpu}` to generate ground-truth LES on GPU via `VulkanLESBackend` (still reads back each step for CPU-side encoding).
 - When using `--les-backend gpu`, you can enable spectral truncation with `--spectral-truncation exp --trunc-alpha 36 --trunc-power 8`.
 - `run_v4_snapshots.py` supports `--encode-backend gpu` to run the encode path on GPU; the first step bootstraps `anchor_idx` on CPU, then subsequent steps use GPU encode to reduce readback.
 - `dashiCORE/scripts/run_vulkan_core_mask_majority.py` — GPU smoke test for the `core_mask_majority` compute shader; validates Vulkan carrier dispatch vs CPU majority vote. Requires `VK_ICD_FILENAMES` and python-vulkan/glslc; accepts `--n` (elements per channel) and `--k` (channels).
+ - Update policy: for fresh metrics, re-run the relevant script and append a timestamped summary to `COMPACTIFIED_CONTEXT.md`.
 
 Recent GPU/vkFFT runs (user side):
 - `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json MPLBACKEND=Agg python run_v4_snapshots.py --N 640 --steps 30 --stride 5 --out-dir outputs --backend vulkan --fft-backend vkfft-vulkan --dtype float64 --progress-every 5 --timing`
@@ -165,3 +175,10 @@ Recent GPU/vkFFT runs (user side):
 - Fix `naw.py` voxel grid shape (matplotlib voxels expects edge-aligned arrays).
 - Install `scikit-image` or add a stub to unblock `naw2.py`.
 - Save plots to files when running headless (Agg) instead of calling `plt.show()`.
+
+## Other Utilities
+- `make_kernel_artifacts.py` — generate kernel-only A/z artifacts from a v4 run.
+- `scripts/plot_enstrophy.py` — plot enstrophy from JSON or CSV logs.
+- `scripts/compare_les_gpu_cpu.py` — sanity check GPU LES vs CPU baseline.
+- `scripts/validate_gpu_truth.py` — validate GPU LES against stored truth.
+- `scripts/run_sweep.py` / `scripts/perf_sampler.py` — parameter sweeps and perf sampling.

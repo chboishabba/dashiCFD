@@ -10,3 +10,7 @@
 ## Misc cleanup
 - [ ] Decide fp32 vs fp64 decode default on AMD; document chosen policy.
 - [ ] Choose location/policy for compiled `.spv` artifacts (single source of truth).
+
+## Docs
+- [x] Add `docs/overview.md` quickstart + runner map + backend notes.
+- [x] Refresh `README.md` with runner pointers and utility scripts list.

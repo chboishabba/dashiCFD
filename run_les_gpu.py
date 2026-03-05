@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""GPU-only LES run with vkFFT + Vulkan kernels; emits enstrophy and optional visuals."""
+"""
+GPU-only LES run with vkFFT + Vulkan kernels; emits enstrophy and optional visuals.
+
+Example:
+  MPLBACKEND=Agg python run_les_gpu.py --N 512 --steps 20000 --stats-every 200 --progress-every 2000
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,10 @@ from vulkan_les_backend import VulkanLESBackend, init_random_omega
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--N", type=int, default=256, help="grid size (default: 256)")
     p.add_argument("--steps", type=int, default=5000, help="number of steps")
     p.add_argument("--dt", type=float, default=0.01, help="time step")

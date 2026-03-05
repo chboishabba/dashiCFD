@@ -1,6 +1,21 @@
 # COMPACTIFIED_CONTEXT
 
-Date: 2026-01-24 (MPLBACKEND=Agg runs).
+Date: 2026-02-06 (cache synced to local ~/.chatgpt_history.sqlite3 as of 2026-02-05).
+
+## Context Freshness (cached + newly pulled 2026-02-06)
+- `6976f652-cf80-8324-bc14-e764bddc7316` (Branch · DASHI vs LES, 2026-01-27): Vulkan `perf_kernel.py` run succeeded; next steps were documentation + hygiene after proving GPU path.
+- `6974cb58-dbe0-8321-b2b5-ce0429cb4480` (DASHI vs LES, 2026-01-25): Sprint plan “Autonomous Operator Generalization” with objectives, acceptance tests, deliverables; keep GPU/Vulkan path proven, focus on permission gating (no new size math).
+- `69757e17-3998-8322-82ec-66e23cc70232` (CFD Folder Shared Fix, 2026-01-25): RX 580/Polaris lacks `VK_KHR_video_encode_queue`; Vulkan video encoders (`h264_vulkan`, `hevc_vulkan`, `av1_vulkan`) are impossible on this GPU. Use CPU VP9 (`libvpx-vp9`) or AMD VAAPI (`h264_vaapi` with `format=nv12,hwupload`, `-vaapi_device /dev/dri/renderD128`). Vulkan remains correct for compute (VkFFT, CFD).
+- `6960722d-3e28-8323-991b-912a640ce570` (DASHI Physics, 2026-01-24): Formal interpretation of ω/ω̂/error triptychs; clarifies what plots prove and open gaps.
+- `6974163f-4634-8324-870c-7b926e2d2f27` (dashiCORE README Outline, 2026-01-24): Plan to inventory functions and build efficiency surfaces across workloads/backends.
+- `6965ba57-f500-8322-96d9-0e3db4de9220` (Branch · DASHI learner context5 -- trading, 2026-01-15): Trading state—BTC hard-blocked; ES/NQ need effect-size; patch plan provided.
+- Older conceptual threads kept for provenance: `696da482-ca2c-8322-b792-45dc313a3d06` (DASHI Atom vacuum formalism), `6966fb93-2c38-8327-97e4-b2074aa44e0a` (Phase-3 surfaces complete), `69607177-6760-8323-b0a8-f22afbb6b455` (MDL canonical), `69604a2e-606c-8323-aed1-bd6158f73e5a` (discrete branches from continuous systems), `69634147-dca4-8321-a20d-34635b170aaf` (gauge/invariants/legal inputs), and `696b37ae-17f8-8324-b485-4fc779fd7262` / `696b3f34-ddf4-8323-acfe-94a5091260cb` / `696b2307-8d70-8321-9db0-bc21b4f9f297` (formalizing DASHI kernel).
+
+## Missing exports (no messages cached; needs download/ingest)
+- `696504b3-18f8-832d-825c-4f79eda29201`
+- `6966ea7e-55e4-8322-8d81-2096ecc0f4e5`
+- `690828e5-af20-8320-956c-e1b09cea911d`
+If these matter, export them from ChatGPT and re-ingest before updating context.
 
 ## Repo Map
 - `dashi_cfd_operator_v3.py` / `v4.py`: spectral LES rollouts + DASHI residual codec (v4 adds residual closure).

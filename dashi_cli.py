@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Interactive CLI wrapper for common GPU/CPU workflows."""
+"""
+Interactive CLI wrapper for common GPU/CPU workflows.
+
+Examples:
+  python dashi_cli.py les --interactive
+  python dashi_cli.py kernel --interactive
+  python dashi_cli.py plot --interactive
+  python dashi_cli.py compare --interactive
+"""
 
 from __future__ import annotations
 
@@ -220,62 +228,81 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    les = sub.add_parser("les", help="GPU LES run (vkFFT + Vulkan)")
+    les = sub.add_parser(
+        "les",
+        help="GPU LES run (vkFFT + Vulkan)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     les.add_argument("--interactive", action="store_true", help="prompt for params")
-    les.add_argument("--N", type=int, default=512)
-    les.add_argument("--steps", type=int, default=200000)
-    les.add_argument("--dt", type=float, default=0.01)
-    les.add_argument("--nu0", type=float, default=1e-4)
-    les.add_argument("--Cs", type=float, default=0.17)
-    les.add_argument("--stats-every", type=int, default=200)
-    les.add_argument("--viz-every", type=int, default=0)
-    les.add_argument("--progress-every", type=int, default=2000)
-    les.add_argument("--out-dir", type=Path, default=Path("outputs"))
-    les.add_argument("--prefix", type=str, default="les_gpu")
-    les.add_argument("--fft-backend", type=str, default="vkfft-vulkan")
-    les.add_argument("--spectral-truncation", type=str, default="none")
-    les.add_argument("--trunc-alpha", type=float, default=36.0)
-    les.add_argument("--trunc-power", type=float, default=8.0)
+    les.add_argument("--N", type=int, default=512, help="grid size")
+    les.add_argument("--steps", type=int, default=200000, help="number of steps")
+    les.add_argument("--dt", type=float, default=0.01, help="time step")
+    les.add_argument("--nu0", type=float, default=1e-4, help="base viscosity")
+    les.add_argument("--Cs", type=float, default=0.17, help="Smagorinsky constant")
+    les.add_argument("--stats-every", type=int, default=200, help="emit enstrophy every K steps")
+    les.add_argument("--viz-every", type=int, default=0, help="save PNG every K steps (0 disables)")
+    les.add_argument("--progress-every", type=int, default=2000, help="print progress every K steps")
+    les.add_argument("--out-dir", type=Path, default=Path("outputs"), help="output directory")
+    les.add_argument("--prefix", type=str, default="les_gpu", help="output filename prefix")
+    les.add_argument("--fft-backend", type=str, default="vkfft-vulkan", help="FFT backend")
+    les.add_argument("--spectral-truncation", type=str, default="none", help="spectral truncation filter")
+    les.add_argument("--trunc-alpha", type=float, default=36.0, help="exp truncation alpha")
+    les.add_argument("--trunc-power", type=float, default=8.0, help="exp truncation power")
     les.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     les.set_defaults(func=cmd_les)
 
-    kernel = sub.add_parser("kernel", help="Kernel rollout + decode")
+    kernel = sub.add_parser(
+        "kernel",
+        help="Kernel rollout + decode",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     kernel.add_argument("--interactive", action="store_true", help="prompt for params")
-    kernel.add_argument("--z0-npz", dest="z0_npz", type=str, default="outputs/kernel_N128_z0.npz")
-    kernel.add_argument("--A-npz", dest="A_npz", type=str, default="outputs/kernel_N128_A.npz")
-    kernel.add_argument("--steps", type=int, default=20000)
-    kernel.add_argument("--decode-every", type=int, default=200)
-    kernel.add_argument("--observer", type=str, default="snapshots")
-    kernel.add_argument("--backend", type=str, default="vulkan")
-    kernel.add_argument("--fft-backend", type=str, default="vkfft-vulkan")
-    kernel.add_argument("--op-backend", type=str, default="vulkan")
+    kernel.add_argument("--z0-npz", dest="z0_npz", type=str, default="outputs/kernel_N128_z0.npz", help="z0 npz with proxy state")
+    kernel.add_argument("--A-npz", dest="A_npz", type=str, default="outputs/kernel_N128_A.npz", help="operator npz with key A")
+    kernel.add_argument("--steps", type=int, default=20000, help="rollout steps")
+    kernel.add_argument("--decode-every", type=int, default=200, help="decode every K steps")
+    kernel.add_argument("--observer", type=str, default="snapshots", help="observer policy")
+    kernel.add_argument("--backend", type=str, default="vulkan", help="dashiCORE backend")
+    kernel.add_argument("--fft-backend", type=str, default="vkfft-vulkan", help="FFT backend for decode")
+    kernel.add_argument("--op-backend", type=str, default="vulkan", help="operator backend")
     kernel.add_argument("--require-gpu", action=argparse.BooleanOptionalAction, default=True)
-    kernel.add_argument("--metrics-json", type=str, default="outputs/perf_snapshots_gpu.json")
+    kernel.add_argument("--metrics-json", type=str, default="outputs/perf_snapshots_gpu.json", help="optional metrics output file")
     kernel.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     kernel.set_defaults(func=cmd_kernel)
 
-    plot = sub.add_parser("plot", help="Plot enstrophy from JSON/CSV")
+    plot = sub.add_parser(
+        "plot",
+        help="Plot enstrophy from JSON/CSV",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     plot.add_argument("--interactive", action="store_true", help="prompt for params")
-    plot.add_argument("--input", type=str, default="outputs/perf_snapshots_gpu.json")
-    plot.add_argument("--output", type=str, default="outputs/enstrophy.png")
-    plot.add_argument("--format", type=str, default="json")
-    plot.add_argument("--title", type=str, default="")
+    plot.add_argument("--input", type=str, default="outputs/perf_snapshots_gpu.json", help="input JSON/CSV file")
+    plot.add_argument("--output", type=str, default="outputs/enstrophy.png", help="output PNG path")
+    plot.add_argument("--format", type=str, default="json", help="input format")
+    plot.add_argument("--title", type=str, default="", help="optional plot title")
     plot.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     plot.set_defaults(func=cmd_plot)
 
-    compare = sub.add_parser("compare", help="Compare GPU LES vs CPU baseline")
+    compare = sub.add_parser(
+        "compare",
+        help="Compare GPU LES vs CPU baseline",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     compare.add_argument("--interactive", action="store_true", help="prompt for params")
-    compare.add_argument("--N", type=int, default=64)
-    compare.add_argument("--steps", type=int, default=50)
-    compare.add_argument("--dt", type=float, default=0.01)
-    compare.add_argument("--nu0", type=float, default=1e-4)
-    compare.add_argument("--Cs", type=float, default=0.17)
-    compare.add_argument("--seed", type=int, default=0)
-    compare.add_argument("--stats-every", type=int, default=10)
-    compare.add_argument("--fft-backend", type=str, default="vkfft-vulkan")
+    compare.add_argument("--N", type=int, default=64, help="grid size")
+    compare.add_argument("--steps", type=int, default=50, help="number of steps")
+    compare.add_argument("--dt", type=float, default=0.01, help="time step")
+    compare.add_argument("--nu0", type=float, default=1e-4, help="base viscosity")
+    compare.add_argument("--Cs", type=float, default=0.17, help="Smagorinsky constant")
+    compare.add_argument("--seed", type=int, default=0, help="initial condition seed")
+    compare.add_argument("--stats-every", type=int, default=10, help="print enstrophy every K steps")
+    compare.add_argument("--fft-backend", type=str, default="vkfft-vulkan", help="FFT backend for GPU")
     compare.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     compare.set_defaults(func=cmd_compare)
 

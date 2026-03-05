@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Compare GPU LES vs CPU baseline on a small run (sanity check)."""
+"""
+Compare GPU LES vs CPU baseline on a small run (sanity check).
+
+Example:
+  MPLBACKEND=Agg python scripts/compare_les_gpu_cpu.py --N 64 --steps 50 --stats-every 10
+"""
 
 from __future__ import annotations
 
@@ -29,7 +34,10 @@ class CompareResult:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--N", type=int, default=64, help="grid size (default: 64)")
     p.add_argument("--steps", type=int, default=50, help="number of steps (default: 50)")
     p.add_argument("--dt", type=float, default=0.01, help="time step")

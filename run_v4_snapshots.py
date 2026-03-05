@@ -3,6 +3,14 @@
 Generate snapshot triptychs for dashi_cfd_operator_v4 at regular intervals.
 
 Each saved PNG contains (ω true, ω̂ decoded+residual, error) at a target timestep.
+
+Examples:
+  MPLBACKEND=Agg python run_v4_snapshots.py --N 64 --steps 3000 --stride 300 --out-dir outputs
+  MPLBACKEND=Agg python run_v4_snapshots.py --kernel-only --z0-npz outputs/kernel_N128_z0.npz --A-npz outputs/kernel_N128_A.npz
+
+Notes:
+  - --kernel-only requires --z0-npz and --A-npz.
+  - --no-ground-truth requires --traj-npz if encoding is needed.
 """
 
 from __future__ import annotations
@@ -33,7 +41,10 @@ from dashi_cfd_operator_v4 import (
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--N", type=int, default=64, help="grid size (default: 64)")
     p.add_argument("--steps", type=int, default=3000, help="total rollout steps (default: 3000)")
     p.add_argument("--stride", type=int, default=300, help="save every STRIDE steps (default: 300)")

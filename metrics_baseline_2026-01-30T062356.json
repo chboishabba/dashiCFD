@@ -1,0 +1,103 @@
+{
+  "run_ts": "2026-01-30T062356",
+  "N": 64,
+  "steps": 3000,
+  "stride": 300,
+  "dt": 0.01,
+  "backend": "vulkan",
+  "fft_backend_requested": "vkfft-vulkan",
+  "fft_backend_used": "vulkan",
+  "dtype": "<class 'numpy.float32'>",
+  "op_backend": "cpu",
+  "op_device": "cpu",
+  "decode_backend_requested": "vulkan",
+  "decode_backend_used": "vulkan",
+  "decode_device": "gpu",
+  "device_name": "AMD Radeon RX 580 Series (RADV POLARIS10)",
+  "gpu_hotloop_active": false,
+  "encode_s": 135.35874886997044,
+  "encode_cpu_s": 107.79604902099999,
+  "sim_s": 122.26752779458184,
+  "sim_cpu_s": 96.29703716099999,
+  "sim_gpu_wait_s": 0.0,
+  "sim_gpu_time_s": 0.0,
+  "encode_proxy_s": 12.930176968569867,
+  "encode_proxy_cpu_s": 11.345329732999748,
+  "encode_gpu_wait_s": 0.0,
+  "encode_gpu_time_s": 0.0,
+  "learn_s": 0.2618866269476712,
+  "learn_cpu_s": 1.5758561049999997,
+  "rollout_s": 0.19777191703906283,
+  "rollout_cpu_s": 0.5574190210000012,
+  "rollout_gpu_wait_s": 0.0,
+  "rollout_gpu_time_s": 0.0,
+  "decode_total_s": 0.3340405090129934,
+  "decode_cpu_s": 0.31368804799997463,
+  "decode_gpu_wait_s": 0.002231391961686313,
+  "decode_gpu_time_s": 0.001172,
+  "decode_per_snap_s": 0.033404050901299345,
+  "plot_s": 3.036850826058071,
+  "plot_cpu_s": 3.0043945259999987,
+  "video_s": 0.0,
+  "video_cpu_s": 0.0,
+  "wall_s": 140.01143574900925,
+  "cpu_wall_s": 113.30716800399999,
+  "hash_every": 0,
+  "hashes": [],
+  "snapshot_errors": [
+    {
+      "t": 300,
+      "rel_l2": 0.6472513464777289,
+      "corr": 0.7863700955904582
+    },
+    {
+      "t": 600,
+      "rel_l2": 0.7664293433532392,
+      "corr": 0.6999737672770764
+    },
+    {
+      "t": 900,
+      "rel_l2": 0.9352277750414492,
+      "corr": 0.5541019206606758
+    },
+    {
+      "t": 1200,
+      "rel_l2": 0.9084644591793369,
+      "corr": 0.5790165015686608
+    },
+    {
+      "t": 1500,
+      "rel_l2": 0.9289665851282259,
+      "corr": 0.5617054808075916
+    },
+    {
+      "t": 1800,
+      "rel_l2": 0.8201436937602077,
+      "corr": 0.658187177683713
+    },
+    {
+      "t": 2100,
+      "rel_l2": 0.8886011242150181,
+      "corr": 0.5980551045361747
+    },
+    {
+      "t": 2400,
+      "rel_l2": 0.8601931597206087,
+      "corr": 0.6225805787540305
+    },
+    {
+      "t": 2700,
+      "rel_l2": 0.8635209579383478,
+      "corr": 0.6171128524626502
+    },
+    {
+      "t": 3000,
+      "rel_l2": 0.8749386735963666,
+      "corr": 0.6077344347813602
+    }
+  ],
+  "decode_parity": [],
+  "perf_flags": [
+    "GPU_ROLLOUT_NOT_IMPLEMENTED_VULKAN"
+  ]
+}

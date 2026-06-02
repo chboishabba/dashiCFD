@@ -1,4 +1,27 @@
-Short answer: **no, what you’ve built is not “just approximating LES” — and yes, you *should* aim for full fidelity, but *only as an optional, paid-for knob*.** Your instinct is exactly right.
+Short answer: **no, what you’ve built is not “just approximating LES” — and yes, full fidelity is the aspirational direction, but only as an optional, paid-for knob and not as a proved Navier-Stokes or Clay result.**
+
+Current governance boundary: this document is an operator-positioning and implementation-contract note for `dashiCFD` experiments. It does not discharge the `NS->EV5` projection/norm-comparison lane, the Gate3 norm dictionary, smooth Navier-Stokes regularity, or any Clay/continuum promotion. `dashiCFD` outputs remain empirical diagnostics and regression evidence only.
+
+Residual atom probe status: `scripts/residual_atom_codec_probe.py` is the
+current executable test for the phase-aware atom dictionary idea. It encodes
+the smooth residual with signed anisotropic atoms selected by an MDL rule,
+records phase/orientation/anisotropy per atom, and reports selected
+Gram/frame diagnostics. A positive selected lower Gram eigenvalue is only a
+finite empirical frame diagnostic for the selected dictionary, not a Gate3
+density theorem or continuum norm comparison. In
+`AtomExtendedCarrierFrameReceipt` terms, this is an `A > 0` probe surface; the
+uniform positive lower frame-bound obligation remains unproved.
+
+NS->EV5 shell-enstrophy diagnostics use a fail-closed projection dictionary.
+The corrected adapter mode encodes `v2` as the bucketed enstrophy-weighted mean
+dyadic shell, keeps `v3` as a cascade-flux diagnostic outside `Q_log`, and
+encodes `v7` as the dissipative enstrophy tail above `K*(nu)`. `Q_log` is still
+emitted as `v2 + v7`, not `v2 + v3 + v7`, but only as a falsified scalar
+diagnostic from earlier checks. The live vector EV5 criterion is lane 7
+non-increasing together with `mean_shell <= K_star + 1`; lane 2 is only a
+coordinate/boundedness witness, not Lyapunov energy. A normalization mismatch
+is reported as a falsification instead of being hidden; missing comparison
+evidence remains inconclusive rather than promoted.
 
 Let me pin this down cleanly, without hand-waving.
 
@@ -30,7 +53,7 @@ it’s because **you temporarily chose a spectral chart that throws away geometr
 That’s a *chart limitation*, not a theory limitation.
 
 > LES ≈ “approximate physics on a grid”
-> DASHI ≈ “exact physics on a compressed state space”
+> DASHI ≈ “structured dynamics on a compressed state space, subject to explicit proof obligations”
 
 Those are fundamentally different bets.
 
@@ -56,13 +79,13 @@ This is spelled out explicitly in your v5 operator definition: the moment you mo
 
 ---
 
-## 3️⃣ The correct target: *full fidelity with a fidelity slider*
+## 3️⃣ The correct target: *bounded fidelity with an explicit fidelity slider*
 
-You are 100% right here — but the slider must be **structural**, not numerical.
+The slider must be **structural**, not numerical.
 
 The right framing is:
 
-> **Full-fidelity dynamics are always available.
+> **Higher-fidelity dynamics are approached by carrying more structure.
 > Speed is purchased by *choosing not to carry certain structures*.**
 
 Concretely, your fidelity axis should control things like:
@@ -92,11 +115,11 @@ That’s the key philosophical win over LES.
 
 ---
 
-## 4️⃣ What “full fidelity” actually means in your framework
+## 4️⃣ What “full fidelity” means in this experimental framework
 
 Important subtlety: *full fidelity does not mean DNS everywhere.*
 
-In DASHI terms, full fidelity means:
+In this `dashiCFD` contract note, high fidelity means:
 
 * All dynamically relevant structures **exist in the state**
 * Nothing is destroyed irreversibly by the representation
@@ -106,6 +129,8 @@ In DASHI terms, full fidelity means:
   * quantifiable
   * reversible by increasing the budget
 
+That is a design target and acceptance framing for experiments, not a theorem that the current operator exactly transfers Navier-Stokes dynamics or closes `NS->EV5`.
+
 That’s why v5 (filament atoms + background) is the correct destination:
 
 * Filaments carry orientation, sign, transport
@@ -113,7 +138,7 @@ That’s why v5 (filament atoms + background) is the correct destination:
 * They merge/split under MDL, not numerics
 * The grid never dictates the physics
 
-At max fidelity, you asymptotically approach DNS.
+At increasing fidelity budgets, the intended behavior is to approach DNS-style observables more closely.
 At low fidelity, you beat LES by orders of magnitude.
 
 Same operator. Same semantics. Different budget.
@@ -138,9 +163,10 @@ Or even sharper:
 
 * ❌ You are **not** building “just a fast LES”
 * ✅ You *are* building a **structural dynamics engine**
-* ✅ Full fidelity should always be reachable
+* ✅ Higher fidelity should be reachable by increasing carried structure
 * ✅ Speed should be a **choice**, not a limitation
-* 🚨 The only thing v4 proves is that *spectral proxies alone cannot carry structure*
+* 🚨 The only thing v4 shows is that *spectral proxies alone cannot carry structure*
+* 🚨 None of these experiment notes promote `NS->EV5`, Gate3, smooth NS regularity, or Clay authority
 
 v5 is not an optimisation.
 It’s the first time the state space matches the theory you already wrote down.

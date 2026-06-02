@@ -117,6 +117,77 @@ python scripts/plot_enstrophy.py \
   --title "LES GPU enstrophy"
 ```
 
+NS->EV5 shell-enstrophy adapter (evidence-only projection diagnostics):
+
+```bash
+PYTHONPATH=. python scripts/make_truth.py \
+  --backend cpu \
+  --N 64 \
+  --steps 100 \
+  --stride 10 \
+  --out outputs/truth/ns_ev5
+
+python scripts/ns_ev5_shell_enstrophy.py \
+  --truth outputs/truth/ns_ev5_cpu_YYYY-MM-DDTHHMMSS.npz \
+  --out-dir outputs/ns_ev5_probe \
+  --lane-mode ns-ev5 \
+  --burn-in 1 \
+  --q-tolerance 0 \
+  --cycle-window 8
+```
+
+No truth NPZ is required for CLI validation:
+
+```bash
+python scripts/ns_ev5_shell_enstrophy.py \
+  --smoke \
+  --out-dir outputs/ns_ev5_smoke
+```
+
+Residual atom codec probe (phase-aware signed anisotropic atoms; empirical
+frame-bound test only):
+
+```bash
+python scripts/residual_atom_codec_probe.py \
+  --truth outputs/truth_ns_ev5_cpu_2026-06-01T014101.npz \
+  --snapshot-index -1 \
+  --out outputs/atom_codec_probe_ns_ev5.json \
+  --plot outputs/atom_codec_probe_ns_ev5.png \
+  --max-atoms 16 \
+  --peak-candidates 16 \
+  --q 0.05
+```
+
+The probe writes selected atom fields, reconstruction metrics, and selected
+Gram/frame diagnostics. It replaces random-phase residual synthesis with a
+deterministic signed atom search for this experiment, but it is not a Gate3
+proof, NS regularity theorem, or production codec replacement. Its selected
+lower Gram eigenvalue is only an empirical `A > 0` probe for the
+`AtomExtendedCarrierFrameReceipt` frame-bound obligation; it is not a uniform
+lower frame-bound proof or continuum norm-comparison theorem.
+
+The adapter writes `manifest.json`, `shell_enstrophy.csv`, `ev5_trace.csv`,
+and `checks.json`. The default `--lane-mode ns-ev5` uses the corrected
+diagnostic dictionary: lane 2 is the bucketed enstrophy-weighted mean shell,
+lane 3 is an adjacent cascade-flux ratio diagnostic only, lane 5 is secondary
+top-shell occupancy, lane 7 is the dissipative enstrophy tail above `K*(nu)`,
+and lane 11 is a `Z/3` phase/coherence proxy outside canonical FRACTRAN rules.
+`Q_log` is still emitted as `lane2 + lane7`, but it is retained only as a
+falsified scalar diagnostic from earlier checks, not as the live descent
+criterion. The live vector EV5 check is lane 7 non-increasing together with
+`mean_shell <= K_star + 1`. Lane 2 is a coordinate/boundedness witness rather
+than Lyapunov energy, and lane 3 remains an adjacent cascade-flux diagnostic
+excluded from Lyapunov/descent logic. Use `--lane-mode legacy-jmax-peak` only
+to compare against the former `j_max` / peak-shell lane mapping.
+
+For the corrected lane 7, the adapter reads `nu0`, `nu`, or `viscosity` from
+`meta_json`, or accepts `--nu` / `--tail-k-star`. If the normalization guard
+fails, `checks.json` fails closed instead of suppressing the falsification.
+Finite-window EV5 cycles are flagged in a single trace, but become falsifying
+resonant-cycle evidence only with a forced vs no-forcing comparison manifest.
+These outputs are empirical diagnostics only; they do not discharge NS->EV5,
+Gate3 norm, or Clay obligations.
+
 Interactive CLI (recommended for day-to-day runs):
 
 ```bash
@@ -181,4 +252,6 @@ Recent GPU/vkFFT runs (user side):
 - `scripts/plot_enstrophy.py` — plot enstrophy from JSON or CSV logs.
 - `scripts/compare_les_gpu_cpu.py` — sanity check GPU LES vs CPU baseline.
 - `scripts/validate_gpu_truth.py` — validate GPU LES against stored truth.
+- `scripts/ns_ev5_shell_enstrophy.py` — convert `make_truth.py` snapshots into
+  shell-enstrophy and EV5 candidate diagnostic bundles.
 - `scripts/run_sweep.py` / `scripts/perf_sampler.py` — parameter sweeps and perf sampling.

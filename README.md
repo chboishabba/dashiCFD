@@ -136,6 +136,28 @@ python scripts/ns_ev5_shell_enstrophy.py \
   --cycle-window 8
 ```
 
+3D periodic incompressible truth artifact for physical bridge falsification:
+
+```bash
+python3 scripts/make_truth_3d.py \
+  --N 32 \
+  --steps 200 \
+  --save-every 10 \
+  --dt 0.002 \
+  --nu0 0.001 \
+  --seed 0 \
+  --out outputs/truth3d/ns3d_N32_seed0.npz
+```
+
+The 3D truth lane is separate from the existing 2D DASHI/LES pipeline. It
+writes `omega_snapshots` with shape `(T,N,N,N,3)`, `velocity_snapshots` with
+the same vector shape by default, `steps`, diagnostics, and `meta_json`
+declaring `dimension=3`, periodic boundaries, Leray projection, and 2/3
+dealiasing. The script fails closed when saved fields are non-finite,
+divergence/curl checks fail, CFL exceeds the configured bound, or fewer than
+five vorticity shells are nonzero at or above `K_star`. Packet lineage labels
+are intentionally deferred until after the 3D physical bridge harness runs.
+
 No truth NPZ is required for CLI validation:
 
 ```bash
@@ -167,7 +189,7 @@ lower Gram eigenvalue is only an empirical `A > 0` probe for the
 lower frame-bound proof or continuum norm-comparison theorem.
 
 The adapter writes `manifest.json`, `shell_enstrophy.csv`, `ev5_trace.csv`,
-and `checks.json`. The default `--lane-mode ns-ev5` uses the corrected
+`theta_profile.csv`, and `checks.json`. The default `--lane-mode ns-ev5` uses the corrected
 diagnostic dictionary: lane 2 is the bucketed enstrophy-weighted mean shell,
 lane 3 is an adjacent cascade-flux ratio diagnostic only, lane 5 is secondary
 top-shell occupancy, lane 7 is the dissipative enstrophy tail above `K*(nu)`,
@@ -183,6 +205,11 @@ to compare against the former `j_max` / peak-shell lane mapping.
 For the corrected lane 7, the adapter reads `nu0`, `nu`, or `viscosity` from
 `meta_json`, or accepts `--nu` / `--tail-k-star`. If the normalization guard
 fails, `checks.json` fails closed instead of suppressing the falsification.
+The theta runtime diagnostic is a finite cutoff/time vector:
+`theta(k,t)=|Flux_tail(k,t)|/Diss_tail(k,t)` for fixed cutoffs `k >= K*(nu)`,
+`Theta=max_k sup_t theta(k,t)`, and `danger_shell` is the argmax over that
+fixed cutoff profile. It assumes no monotonicity in `k`; missing or zero
+dissipation fails closed.
 Finite-window EV5 cycles are flagged in a single trace, but become falsifying
 resonant-cycle evidence only with a forced vs no-forcing comparison manifest.
 These outputs are empirical diagnostics only; they do not discharge NS->EV5,
@@ -252,6 +279,8 @@ Recent GPU/vkFFT runs (user side):
 - `scripts/plot_enstrophy.py` — plot enstrophy from JSON or CSV logs.
 - `scripts/compare_les_gpu_cpu.py` — sanity check GPU LES vs CPU baseline.
 - `scripts/validate_gpu_truth.py` — validate GPU LES against stored truth.
+- `scripts/make_truth_3d.py` — CPU pseudo-spectral 3D periodic incompressible
+  truth generator for velocity/vorticity bridge artifacts.
 - `scripts/ns_ev5_shell_enstrophy.py` — convert `make_truth.py` snapshots into
   shell-enstrophy and EV5 candidate diagnostic bundles.
 - `scripts/run_sweep.py` / `scripts/perf_sampler.py` — parameter sweeps and perf sampling.

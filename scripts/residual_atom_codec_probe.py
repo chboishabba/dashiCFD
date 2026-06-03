@@ -204,6 +204,9 @@ def _frame_diagnostics(kernels: list[np.ndarray]) -> dict[str, float | int | boo
             "atoms": 0,
             "lower_frame_bound_selected": 0.0,
             "upper_frame_bound_selected": 0.0,
+            "frame_A_selected_empirical": 0.0,
+            "frame_B_selected_empirical": 0.0,
+            "gate3_margin_selected_empirical": 0.0,
             "condition_number_selected": math.inf,
             "positive_lower_bound_selected": False,
         }
@@ -216,6 +219,9 @@ def _frame_diagnostics(kernels: list[np.ndarray]) -> dict[str, float | int | boo
         "atoms": len(kernels),
         "lower_frame_bound_selected": lower,
         "upper_frame_bound_selected": upper,
+        "frame_A_selected_empirical": lower,
+        "frame_B_selected_empirical": upper,
+        "gate3_margin_selected_empirical": lower,
         "condition_number_selected": float(upper / max(lower, 1e-18)),
         "positive_lower_bound_selected": bool(lower > 1e-10),
     }
@@ -297,6 +303,9 @@ def main() -> None:
     atom_metrics = _metrics(omega, reconstruction)
     frame = _frame_diagnostics(kernels)
     elapsed = perf_counter() - t0
+    promotion_status = (
+        "empirical_selected_gram_only_no_uniform_frame_bound_no_gate3_promotion"
+    )
 
     report = {
         "status": "ok",
@@ -322,6 +331,9 @@ def main() -> None:
         "baseline_smooth_only": baseline_metrics,
         "atom_reconstruction": atom_metrics,
         "selected_frame_diagnostics": frame,
+        "frame_A": frame["frame_A_selected_empirical"],
+        "gate3_margin": frame["gate3_margin_selected_empirical"],
+        "promotion_status": promotion_status,
         "atoms": [asdict(atom) for atom in atoms],
         "elapsed_seconds": elapsed,
         "governance": {
@@ -337,6 +349,9 @@ def main() -> None:
             "upper_frame_bound_uniform_B_computed": False,
             "gate3_norm_comparison_proved": False,
             "gate3_proved": False,
+            "frame_A_semantics": "selected Gram lower eigenvalue only; not a uniform lower frame bound",
+            "gate3_margin_semantics": "empirical selected-dictionary margin only; not Gate 3 norm comparison",
+            "promotion_status": promotion_status,
             "ns_regularity_claimed": False,
             "clay_claimed": False,
         },
@@ -353,6 +368,9 @@ def main() -> None:
         "rel_l2_atom": atom_metrics["rel_l2"],
         "residual_sse_reduction_frac": report["residual_sse_reduction_frac"],
         "lower_frame_bound_selected": frame["lower_frame_bound_selected"],
+        "frame_A": report["frame_A"],
+        "gate3_margin": report["gate3_margin"],
+        "promotion_status": report["promotion_status"],
         "elapsed_seconds": elapsed,
     }, indent=2))
 

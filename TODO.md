@@ -14,3 +14,8 @@
 ## Docs
 - [x] Add `docs/overview.md` quickstart + runner map + backend notes.
 - [x] Refresh `README.md` with runner pointers and utility scripts list.
+
+## 3D NS truth bridge
+- [x] Add CPU-first `scripts/make_truth_3d.py` that emits 3D periodic incompressible velocity/vorticity truth NPZ artifacts.
+- [ ] Run external physical bridge harness against `outputs/truth3d/ns3d_N32_seed0.npz` and record whether `C_K` stays bounded.
+- [ ] Add optional lineage labels (`ternary_label_snapshots`, `packet_id_snapshots`, `shell_id_snapshots`) after the 3D bridge falsification path is working.

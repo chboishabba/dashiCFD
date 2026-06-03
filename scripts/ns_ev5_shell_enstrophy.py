@@ -8,6 +8,7 @@ written by ``scripts/make_truth.py`` (NPZ keys: ``omega_snapshots`` and
   * ``manifest.json``
   * ``shell_enstrophy.csv``
   * ``ev5_trace.csv``
+  * ``theta_profile.csv``
   * ``checks.json``
 
 The corrected NS->EV5 diagnostic lane semantics are:
@@ -21,6 +22,16 @@ The corrected NS->EV5 diagnostic lane semantics are:
 The checks are diagnostics only.  A reproducible failure falsifies this
 encoding or its bucketization for the supplied trace family; it is not a
 mathematical theorem, an NS transfer theorem, or Clay evidence.
+
+The theta profile is a seam-gauge diagnostic, not a proof.  For each cutoff
+K >= K*(nu), it estimates
+
+  theta(K,t) = |Flux_tail(K,t)| / Diss_tail(K,t)
+
+from the observed tail balance ``dE_tail/dt = Flux_tail - Diss_tail``.  The
+script records the whole finite cutoff/time profile, the per-shell sup profile,
+and its danger-shell argmax.  It deliberately does not assume monotonicity in
+K and fails closed when dissipation is missing or zero.
 """
 
 from __future__ import annotations
@@ -47,6 +58,25 @@ class EV5Row:
     lane7: int
     lane11: int
     q_log: int
+
+
+@dataclass(frozen=True)
+class ThetaProfileRow:
+    transition_index: int
+    step: int
+    time: float
+    cutoff_shell: int
+    tail_energy_before: float
+    tail_energy_after: float
+    tail_energy_derivative: float
+    viscous_tail_dissipation: float
+    estimated_tail_flux: float
+    theta: float
+    ns_margin: float
+    ns_margin_ratio: float
+    danger_shell: int
+    promotion_status: str
+    is_danger_shell: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,6 +224,10 @@ def _dyadic_shells(n: int) -> np.ndarray:
     return shells
 
 
+def _shell_scales(count: int) -> np.ndarray:
+    return np.asarray([2.0 ** j for j in range(int(count))], dtype=np.float64)
+
+
 def shell_enstrophy(omega: np.ndarray, shells: np.ndarray) -> np.ndarray:
     omega_hat = np.fft.fft2(omega)
     # Parseval-normalized shell energy for vorticity.  The constant scale is
@@ -204,6 +238,280 @@ def shell_enstrophy(omega: np.ndarray, shells: np.ndarray) -> np.ndarray:
     for j in range(max_shell + 1):
         out[j] = float(spectral_weight[shells == j].sum())
     return out
+
+
+def compute_theta_profile_rows(
+    shell_rows: list[np.ndarray],
+    steps: np.ndarray,
+    *,
+    dt: float,
+    nu: float | None,
+    k_star: int,
+) -> tuple[list[ThetaProfileRow], dict]:
+    if nu is None or not math.isfinite(float(nu)) or float(nu) <= 0.0:
+        return [], {
+            "available": False,
+            "reason": "nu missing or nonpositive",
+            "definition": "|dE_tail/dt + Diss_tail| / Diss_tail, computed for every cutoff shell k >= K_star and every transition time t",
+            "finite_vector_semantics": "theta_profile.csv is the finite vector of theta(k,t) rows over the fixed cutoff set k>=K_star and observed transition times",
+            "evidence_only": True,
+            "fail_closed": True,
+            "promotion_status": "diagnostic_unavailable_no_ns_theorem",
+            "monotonicity_assumed": False,
+            "theta": None,
+            "ns_margin": None,
+            "ns_margin_ratio": None,
+            "danger_shell": None,
+            "danger_shell_argmax": None,
+        }
+    if len(shell_rows) < 2:
+        return [], {
+            "available": False,
+            "reason": "theta profile requires at least two shell snapshots",
+            "definition": "|dE_tail/dt + Diss_tail| / Diss_tail, computed for every cutoff shell k >= K_star and every transition time t",
+            "finite_vector_semantics": "theta_profile.csv is the finite vector of theta(k,t) rows over the fixed cutoff set k>=K_star and observed transition times",
+            "evidence_only": True,
+            "fail_closed": True,
+            "promotion_status": "diagnostic_unavailable_no_ns_theorem",
+            "monotonicity_assumed": False,
+            "theta": None,
+            "ns_margin": None,
+            "ns_margin_ratio": None,
+            "danger_shell": None,
+            "danger_shell_argmax": None,
+        }
+
+    max_shells = max((len(row) for row in shell_rows), default=0)
+    if max_shells == 0:
+        return [], {
+            "available": False,
+            "reason": "empty shell rows",
+            "definition": "|dE_tail/dt + Diss_tail| / Diss_tail, computed for every cutoff shell k >= K_star and every transition time t",
+            "finite_vector_semantics": "theta_profile.csv is the finite vector of theta(k,t) rows over the fixed cutoff set k>=K_star and observed transition times",
+            "evidence_only": True,
+            "fail_closed": True,
+            "promotion_status": "diagnostic_unavailable_no_ns_theorem",
+            "monotonicity_assumed": False,
+            "theta": None,
+            "ns_margin": None,
+            "ns_margin_ratio": None,
+            "danger_shell": None,
+            "danger_shell_argmax": None,
+        }
+
+    padded = []
+    for row in shell_rows:
+        arr = np.zeros(max_shells, dtype=np.float64)
+        arr[: len(row)] = row
+        padded.append(arr)
+    scales = _shell_scales(max_shells)
+    diss_weight = 2.0 * float(nu) * (scales * scales)
+    start_k = max(int(k_star), 0)
+    if start_k >= max_shells:
+        return [], {
+            "available": False,
+            "reason": "no shell cutoffs at or above K_star in finite theta vector",
+            "definition": "|dE_tail/dt + Diss_tail| / Diss_tail, computed for every cutoff shell k >= K_star and every transition time t",
+            "finite_vector_semantics": "theta_profile.csv is the finite vector of theta(k,t) rows over the fixed cutoff set k>=K_star and observed transition times",
+            "evidence_only": True,
+            "fail_closed": True,
+            "seam_gauge_only": True,
+            "promotion_status": "diagnostic_unavailable_no_ns_theorem",
+            "monotonicity_assumed": False,
+            "K_star": int(k_star),
+            "profile_shell_count": 0,
+            "profile": [],
+            "theta": None,
+            "Theta": None,
+            "theta_sup": None,
+            "ns_margin": None,
+            "ns_margin_ratio": None,
+            "danger_shell": None,
+            "danger_shell_argmax": None,
+            "danger_shell_rule": "argmax over the fixed-cutoff per-shell sup profile theta_k = sup_t theta(k,t)",
+            "theta_less_than_one_is_proof": False,
+            "bkm_equivalence_claimed": False,
+            "ns_theorem_claimed": False,
+        }
+
+    rows: list[ThetaProfileRow] = []
+    danger_theta_values: list[float] = []
+    danger_shells: list[int] = []
+    theta_lt_one_flags: list[bool] = []
+    eps = 1e-300
+
+    for idx, (before, after) in enumerate(zip(padded, padded[1:])):
+        step_delta = int(steps[idx + 1]) - int(steps[idx]) if len(steps) > idx + 1 else 1
+        transition_dt = float(dt) * float(step_delta if step_delta > 0 else 1)
+        transition_records = []
+        for cutoff in range(start_k, max_shells):
+            tail_before = float(before[cutoff:].sum())
+            tail_after = float(after[cutoff:].sum())
+            derivative = (tail_after - tail_before) / max(transition_dt, eps)
+            dissipation = float(np.dot(diss_weight[cutoff:], before[cutoff:]))
+            raw_flux = derivative + dissipation
+            flux = abs(raw_flux)
+            theta = flux / max(dissipation, eps) if dissipation > 0.0 else math.inf
+            ns_margin = dissipation - flux
+            ns_margin_ratio = 1.0 - theta if math.isfinite(theta) else -math.inf
+            if not math.isfinite(theta):
+                promotion_status = "fail_closed_zero_or_missing_dissipation"
+            elif ns_margin > 0.0:
+                promotion_status = "candidate_pass"
+            elif ns_margin == 0.0:
+                promotion_status = "boundary"
+            else:
+                promotion_status = "fail_leak"
+            transition_records.append(
+                {
+                    "cutoff": int(cutoff),
+                    "tail_before": tail_before,
+                    "tail_after": tail_after,
+                    "derivative": derivative,
+                    "dissipation": dissipation,
+                    "raw_flux": raw_flux,
+                    "flux": flux,
+                    "theta": float(theta),
+                    "ns_margin": float(ns_margin),
+                    "ns_margin_ratio": float(ns_margin_ratio),
+                    "promotion_status": promotion_status,
+                }
+            )
+
+        finite_records = [r for r in transition_records if math.isfinite(r["theta"])]
+        if finite_records:
+            danger = max(finite_records, key=lambda r: r["theta"])
+            danger_theta = float(danger["theta"])
+            danger_shell = int(danger["cutoff"])
+        else:
+            danger = transition_records[0]
+            danger_theta = math.inf
+            danger_shell = int(danger["cutoff"])
+
+        danger_theta_values.append(danger_theta)
+        danger_shells.append(danger_shell)
+        theta_lt_one_flags.append(bool(danger_theta < 1.0))
+
+        for record in transition_records:
+            rows.append(
+                ThetaProfileRow(
+                    transition_index=int(idx),
+                    step=int(steps[idx + 1]) if len(steps) > idx + 1 else int(idx + 1),
+                    time=float(steps[idx + 1]) * float(dt) if len(steps) > idx + 1 else float(idx + 1) * float(dt),
+                    cutoff_shell=int(record["cutoff"]),
+                    tail_energy_before=float(record["tail_before"]),
+                    tail_energy_after=float(record["tail_after"]),
+                    tail_energy_derivative=float(record["derivative"]),
+                    viscous_tail_dissipation=float(record["dissipation"]),
+                    estimated_tail_flux=float(record["flux"]),
+                    theta=float(record["theta"]),
+                    ns_margin=float(record["ns_margin"]),
+                    ns_margin_ratio=float(record["ns_margin_ratio"]),
+                    danger_shell=int(danger_shell),
+                    promotion_status=str(record["promotion_status"]),
+                    is_danger_shell=1 if int(record["cutoff"]) == danger_shell else 0,
+                )
+            )
+
+    shell_profile = []
+    for cutoff in range(start_k, max_shells):
+        shell_rows_for_cutoff = [row for row in rows if row.cutoff_shell == cutoff]
+        finite_rows = [row for row in shell_rows_for_cutoff if math.isfinite(row.theta)]
+        if finite_rows:
+            shell_danger = max(finite_rows, key=lambda row: row.theta)
+            theta_k = float(shell_danger.theta)
+            ns_margin_k = float(shell_danger.ns_margin)
+            ns_margin_ratio_k = float(shell_danger.ns_margin_ratio)
+            promotion_status_k = str(shell_danger.promotion_status)
+            transition_index = int(shell_danger.transition_index)
+            step = int(shell_danger.step)
+            time = float(shell_danger.time)
+        else:
+            theta_k = math.inf
+            ns_margin_k = -math.inf
+            ns_margin_ratio_k = -math.inf
+            promotion_status_k = "fail_closed_zero_or_missing_dissipation"
+            transition_index = None
+            step = None
+            time = None
+        shell_profile.append(
+            {
+                "cutoff_shell": int(cutoff),
+                "theta_k": float(theta_k),
+                "ns_margin": float(ns_margin_k),
+                "ns_margin_ratio": float(ns_margin_ratio_k),
+                "promotion_status": promotion_status_k,
+                "danger_transition_index": transition_index,
+                "danger_step": step,
+                "danger_time": time,
+            }
+        )
+
+    finite_profile = [entry for entry in shell_profile if math.isfinite(float(entry["theta_k"]))]
+    if finite_profile:
+        danger_profile_entry = max(finite_profile, key=lambda entry: float(entry["theta_k"]))
+        theta_sup = float(danger_profile_entry["theta_k"])
+    else:
+        danger_profile_entry = shell_profile[0] if shell_profile else None
+        theta_sup = math.inf
+    danger_shell_argmax = int(danger_profile_entry["cutoff_shell"]) if danger_profile_entry is not None else None
+    danger_rows = [row for row in rows if row.cutoff_shell == danger_shell_argmax]
+    finite_danger_rows = [
+        row
+        for row in danger_rows
+        if math.isfinite(row.theta)
+        and math.isfinite(row.ns_margin)
+        and math.isfinite(row.ns_margin_ratio)
+    ]
+    if finite_danger_rows:
+        danger_margin_row = max(finite_danger_rows, key=lambda row: row.theta)
+        ns_margin = float(danger_margin_row.ns_margin)
+        ns_margin_ratio = float(danger_margin_row.ns_margin_ratio)
+        promotion_status = str(danger_margin_row.promotion_status)
+    else:
+        ns_margin = -math.inf
+        ns_margin_ratio = -math.inf
+        promotion_status = "fail_closed_zero_or_missing_dissipation"
+    summary = {
+        "available": True,
+        "definition": "|dE_tail/dt + Diss_tail| / Diss_tail, computed for every cutoff shell k >= K_star and every transition time t",
+        "finite_vector_semantics": "theta_profile.csv is the finite vector of theta(k,t) rows over the fixed cutoff set k>=K_star and observed transition times",
+        "signed_margin_definition": "ns_margin = Diss_tail - |Flux_tail|; ns_margin_ratio = 1 - theta",
+        "balance_convention": "dE_tail/dt = Flux_tail - Diss_tail",
+        "evidence_only": True,
+        "fail_closed": True,
+        "seam_gauge_only": True,
+        "promotion_status": promotion_status,
+        "promotion_status_rule": ">0 candidate_pass; =0 boundary; <0 fail_leak; missing/zero dissipation fail_closed_zero_or_missing_dissipation",
+        "monotonicity_assumed": False,
+        "K_star": int(k_star),
+        "profile_shell_count": int(len(shell_profile)),
+        "profile": shell_profile,
+        "Theta": float(theta_sup),
+        "theta": float(theta_sup),
+        "theta_sup": float(theta_sup),
+        "ns_margin": float(ns_margin),
+        "ns_margin_ratio": float(ns_margin_ratio),
+        "ns_margin_definition": "viscous_tail_dissipation - abs(estimated_tail_flux) at the danger-shell/theta-sup transition",
+        "ns_margin_ratio_definition": "ns_margin / viscous_tail_dissipation; equivalently 1 - theta when dissipation is positive",
+        "ns_margin_positive": bool(ns_margin > 0.0),
+        "danger_shell_argmax": danger_shell_argmax,
+        "danger_shell": danger_shell_argmax,
+        "theta_all_transitions_below_one": bool(all(theta_lt_one_flags)),
+        "danger_shells": [int(k) for k in danger_shells],
+        "danger_shell_unique_values": sorted({int(k) for k in danger_shells}),
+        "max_danger_shell": int(max(danger_shells)) if danger_shells else None,
+        "danger_shell_rule": "argmax over the fixed-cutoff per-shell sup profile theta_k = sup_t theta(k,t)",
+        "theta_less_than_one_is_proof": False,
+        "bkm_equivalence_claimed": False,
+        "ns_theorem_claimed": False,
+        "promotion_boundary": (
+            "Theta is an evidence-only shell diagnostic.  It is not a monotonicity "
+            "claim, not a nonlinear estimate theorem, not an NS regularity theorem, "
+            "and not Clay evidence."
+        ),
+    }
+    return rows, summary
 
 
 def _bucket(value: float, scale: float) -> int:
@@ -555,6 +863,31 @@ def write_ev5_csv(path: Path, rows: list[EV5Row]) -> None:
             writer.writerow(asdict(row))
 
 
+def write_theta_csv(path: Path, rows: list[ThetaProfileRow]) -> None:
+    fieldnames = [
+        "transition_index",
+        "step",
+        "time",
+        "cutoff_shell",
+        "tail_energy_before",
+        "tail_energy_after",
+        "tail_energy_derivative",
+        "viscous_tail_dissipation",
+        "estimated_tail_flux",
+        "theta",
+        "ns_margin",
+        "ns_margin_ratio",
+        "danger_shell",
+        "promotion_status",
+        "is_danger_shell",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(asdict(row))
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -593,14 +926,23 @@ def main() -> None:
         )
         for step, weights in zip(steps, shell_rows)
     ]
+    theta_rows, theta_summary = compute_theta_profile_rows(
+        shell_rows,
+        steps,
+        dt=dt,
+        nu=nu,
+        k_star=tail_k_star,
+    )
 
     shell_csv = args.out_dir / "shell_enstrophy.csv"
     ev5_csv = args.out_dir / "ev5_trace.csv"
+    theta_csv = args.out_dir / "theta_profile.csv"
     checks_json = args.out_dir / "checks.json"
     manifest_json = args.out_dir / "manifest.json"
 
     write_shell_csv(shell_csv, steps, dt, shell_rows)
     write_ev5_csv(ev5_csv, ev5_rows)
+    write_theta_csv(theta_csv, theta_rows)
 
     result_checks = checks(
         ev5_rows,
@@ -615,6 +957,12 @@ def main() -> None:
         weighted_alpha=args.weighted_alpha,
         k_star=tail_k_star,
     )
+    result_checks["theta_profile"] = theta_summary
+    result_checks["theta"] = theta_summary.get("theta")
+    result_checks["ns_margin"] = theta_summary.get("ns_margin")
+    result_checks["ns_margin_ratio"] = theta_summary.get("ns_margin_ratio")
+    result_checks["danger_shell"] = theta_summary.get("danger_shell")
+    result_checks["promotion_status"] = theta_summary.get("promotion_status")
     checks_json.write_text(json.dumps(result_checks, indent=2) + "\n", encoding="utf-8")
 
     manifest = {
@@ -645,7 +993,15 @@ def main() -> None:
             "v11": "Z/3 phase-coherence proxy outside canonical FRACTRAN rules",
             "Q_log": "v2 + v7",
             "vector_criterion": "ev5_admissible = all(diff(lane7)<=0) and all(mean_shell <= K_star + 1)",
+            "theta_profile": (
+                "finite vector over fixed cutoffs k>=K_star and observed transition times: "
+                "theta(k,t)=abs(nonlinear_tail_flux_proxy)/"
+                "viscous_tail_dissipation_proxy; Theta=sup_k theta_k; danger shell is "
+                "argmax profile; ns_margin=Diss-|Flux| and ns_margin_ratio=1-theta; "
+                "monotonicity is not assumed; missing/zero dissipation fails closed"
+            ),
         },
+        "promotion_status": theta_summary.get("promotion_status"),
         "lane_boundary": (
             "Projection dictionary and numerical diagnostics only; not an EV5 transfer theorem, "
             "not an actual-flow Navier-Stokes estimate, and not Clay evidence."
@@ -653,13 +1009,14 @@ def main() -> None:
         "outputs": {
             "shell_enstrophy_csv": str(shell_csv),
             "ev5_trace_csv": str(ev5_csv),
+            "theta_profile_csv": str(theta_csv),
             "checks_json": str(checks_json),
         },
         "evidence_boundary": "2D CFD evidence only; no 3D NS proof or Clay promotion.",
         "source_meta": meta,
     }
     manifest_json.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"[ns-ev5] wrote {manifest_json}, {shell_csv}, {ev5_csv}, {checks_json}")
+    print(f"[ns-ev5] wrote {manifest_json}, {shell_csv}, {ev5_csv}, {theta_csv}, {checks_json}")
     vector_status = result_checks["vector_ev5"]
     print(
         "[ns-ev5] vector "
@@ -668,6 +1025,15 @@ def main() -> None:
         f"v2_bounded={vector_status['v2_bounded']} "
         f"ev5_admissible={vector_status['ev5_admissible']}"
     )
+    if theta_summary.get("available"):
+        print(
+            "[ns-ev5] theta "
+            f"Theta={theta_summary['theta_sup']:.6g} "
+            f"all_below_one={theta_summary['theta_all_transitions_below_one']} "
+            f"danger_shell={theta_summary['danger_shell_argmax']}"
+        )
+    else:
+        print(f"[ns-ev5] theta unavailable: {theta_summary.get('reason')}")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,14 @@ If these matter, export them from ChatGPT and re-ingest before updating context.
   - Default params (N=64, steps=3000, stride=300, backend=vulkan, dtype=float64): saved `outputs/v4_t3000_compare.png`; timing encode=142.132s, learn=0.131s, rollout=0.235s, decode_total=0.043s (0.007s/snap).
 
 ## Notes / Next Actions
+- 2026-06-03: added a separate CPU-first 3D periodic incompressible truth lane
+  at `scripts/make_truth_3d.py`. It emits `omega_snapshots` shaped
+  `(T,N,N,N,3)`, `velocity_snapshots` by default, `steps`, diagnostics, and
+  `meta_json` with `dimension=3`, `projection=leray`, `dealiasing=2/3`,
+  `periodic=true`, `dt`, `nu0`, `N`, `seed`, and backend. This is for physical
+  bridge falsification only; no NS/Clay promotion is implied. Packet lineage
+  labels remain deferred until a 3D truth artifact has been consumed by the
+  harness.
 - Fix voxel grid sizing in `naw.py` (matplotlib voxels expects edge-sized coordinates, e.g., len+1 along each axis).
 - Add dependency set (`numpy`, `matplotlib`, `scikit-image` if keeping `naw2.py`).
 - Replace `plt.show()` calls with file saves for reliable headless runs.

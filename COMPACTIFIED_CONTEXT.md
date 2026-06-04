@@ -2,6 +2,22 @@
 
 Date: 2026-02-06 (cache synced to local ~/.chatgpt_history.sqlite3 as of 2026-02-05).
 
+## 2026-06-04 Sprint 49 Material-Parent GPU Batch
+
+- Added `scripts/ns_material_parent_summary.py` and
+  `tests/test_material_parent_summary.py`.
+- Current producer backend `gpu_spectral_gradient_cpu_packets` computes fp64
+  Vulkan/vkFFT spectral derivatives for stretch-state classification, then does
+  packet matching/bin reduction on CPU.
+- Ran GPU truth + material-parent batches for N32/N64 seed0/seed1 on RADV RX
+  580. Batch summary:
+  `outputs/sprint49_material_parent_gpu_batch/sprint49_material_parent_gpu_batch_summary.json`.
+- Result: `weighted_true_new = 0` and `sigma_true_new = 0` in all four runs;
+  tracking uncertainty is zero or small; weighted cross-shell source dominates.
+  All runs route to `ADJACENT_PACKET_THEOREM_INSUFFICIENT`.
+- Next performance step: compute/read back compact `stretch_state` or packet-bin
+  accumulators on GPU instead of full derivative tensors.
+
 ## Context Freshness (cached + newly pulled 2026-02-06)
 - `6976f652-cf80-8324-bc14-e764bddc7316` (Branch · DASHI vs LES, 2026-01-27): Vulkan `perf_kernel.py` run succeeded; next steps were documentation + hygiene after proving GPU path.
 - `6974cb58-dbe0-8321-b2b5-ce0429cb4480` (DASHI vs LES, 2026-01-25): Sprint plan “Autonomous Operator Generalization” with objectives, acceptance tests, deliverables; keep GPU/Vulkan path proven, focus on permission gating (no new size math).

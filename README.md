@@ -18,6 +18,64 @@ CFD + DASHI experiments for 2D vorticity rollouts, ternary structural codecs, an
   - `MPLBACKEND=Agg python perf_kernel.py --z0-npz outputs/kernel_N128_z0.npz --A-npz outputs/kernel_N128_A.npz --steps 20000 --decode-every 200`
   - `MPLBACKEND=Agg python run_les_gpu.py --N 512 --steps 20000 --stats-every 200 --progress-every 2000`
 
+Sprint 51 signed ternary flip audit:
+
+```bash
+python3 scripts/ns_signed_ternary_flip_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint51_signed_ternary_flip_gpu_audit
+```
+
+Observed six-run N32/N64 result: `NO2CYCLE_FAILS`. Raw cross-shell
+minus-to-plus is `93419828142802.9`, plus-to-minus counter-flow is
+`84731761817324.95`, and the signed imbalance fraction is
+`0.048767829281919015`; the current failing diagnostic is the v1 no-2-cycle
+proxy.
+
+Sprint 52 material source / no-2-cycle amplitude audit:
+
+```bash
+python3 scripts/ns_sprint52_material_no2cycle_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint52_material_no2cycle_gpu_audit
+```
+
+Observed result: `MATERIAL_SOURCE_GATE_CLOSED_NO2CYCLE_AMPLITUDE_BLOCKED`.
+Material true-new positive source is absent; the no-2-cycle amplitude proxy
+remains the active blocker.
+
+Sprint 53 no-2-cycle physical amplitude audit:
+
+```bash
+python3 scripts/ns_sprint53_no2cycle_physical_amplitude_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint53_no2cycle_physical_gpu_audit
+```
+
+Observed result: `MATERIAL_SOURCE_GATE_CLOSED_PHYSICAL_NO2CYCLE_AMPLITUDE_BLOCKED`.
+Material true-new positive source remains absent, but the material
+net-residue physical-amplitude proxy does not clear the sign-cycle gate:
+physical-small fraction is `0.3423412506059137` and
+`sigma_physical_cycle_fit = -1.1215088689186317`.
+
 ## Vulkan GPU commands
 
 Compile SPIR-V (preferred path `dashiCORE/spv/comp` -> `dashiCORE/spv`):
@@ -79,6 +137,61 @@ MPLBACKEND=Agg python run_v4_snapshots.py \
   --timing \
   --progress-every 200
 ```
+
+Sprint 49 3D GPU truth + material-parent audit:
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+python3 scripts/make_truth_3d.py \
+  --backend gpu \
+  --fft-backend vkfft-vulkan \
+  --N 64 \
+  --steps 120 \
+  --save-every 10 \
+  --dt 0.001 \
+  --nu0 0.001 \
+  --seed 0 \
+  --out outputs/truth3d/ns3d_N64_seed0_gpu.npz \
+  --progress-every 10
+
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+python3 scripts/ns_material_parent_summary.py \
+  --truth outputs/truth3d/ns3d_N64_seed0_gpu.npz \
+  --out-dir outputs/sprint49_material_parent_N64_seed0_gpu \
+  --backend gpu \
+  --fft-backend vkfft-vulkan \
+  --diagnostic-precision float64 \
+  --progress-every 4
+```
+
+Current Sprint 49 batch summary:
+
+- `outputs/sprint49_material_parent_gpu_batch/sprint49_material_parent_gpu_batch_summary.csv`
+- `outputs/sprint49_material_parent_gpu_batch/sprint49_material_parent_gpu_batch_summary.json`
+
+Sprint 50 full ternary cross-shell audit from existing Sprint 49 artifacts:
+
+```bash
+python3 scripts/ns_ternary_cross_shell_matrix.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint50_full_ternary_cross_shell_gpu_audit
+```
+
+Current Sprint 50 batch routes as `CROSS_PLUS_FROM_MINUS_DOMINATES`; the
+producer uses `parent_state -> child_state` and derives source kind from
+`parent_relation` plus shell delta, not from Sprint 49 `classification`.
+
+The current material-parent backend is
+`gpu_spectral_gradient_cpu_packets`: fp64 Vulkan/vkFFT spectral derivatives are
+computed on GPU, while packet matching and bin reduction are still CPU-side.
+The next performance step is GPU packet-bin accumulation to avoid full
+derivative readback.
 
 Enstrophy graph from the snapshots metrics JSON:
 

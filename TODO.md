@@ -17,5 +17,9 @@
 
 ## 3D NS truth bridge
 - [x] Add CPU-first `scripts/make_truth_3d.py` that emits 3D periodic incompressible velocity/vorticity truth NPZ artifacts.
+- [x] Add opt-in SPV/vkFFT 3D backend using vendored `dashiCORE` Vulkan infrastructure; keep CPU default and fail-fast GPU semantics.
+- [x] Run GPU `make_truth_3d.py --backend gpu` smoke on target RADV/RX580 host with explicit ICD; validated zero-step and two-step N=16 artifacts.
+- [x] Add fp64 Vulkan/vkFFT probe and diagnostic-only spectral backend for CPU/GPU harness parity; RX580/RADV reports `shaderFloat64=true`, complex128 vkFFT round-trip max error `~1.4e-15`, and N32 harness active-row `Q_K` parity `~3e-14` relative.
+- [ ] Compare longer GPU rollout parity against CPU before using GPU truth artifacts as primary harness evidence.
 - [ ] Run external physical bridge harness against `outputs/truth3d/ns3d_N32_seed0.npz` and record whether `C_K` stays bounded.
 - [ ] Add optional lineage labels (`ternary_label_snapshots`, `packet_id_snapshots`, `shell_id_snapshots`) after the 3D bridge falsification path is working.

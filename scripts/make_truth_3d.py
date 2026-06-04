@@ -10,21 +10,113 @@ Example:
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import math
+import os
+import platform
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 Array = np.ndarray
 
 
+def _run_text(cmd: List[str], timeout: float = 5.0) -> str:
+    try:
+        result = subprocess.run(cmd, check=False, text=True, capture_output=True, timeout=timeout)
+    except Exception as exc:
+        return f"unavailable: {type(exc).__name__}: {exc}"
+    text = (result.stdout or result.stderr or "").strip()
+    return text if text else f"exit={result.returncode}"
+
+
+def _package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except Exception:
+        return "unavailable"
+
+
+def collect_host_provenance(args: argparse.Namespace, gpu_device: Dict[str, object] | None = None) -> Dict[str, object]:
+    uname = platform.uname()
+    env_keys = [
+        "VK_ICD_FILENAMES",
+        "VK_LAYER_PATH",
+        "LD_LIBRARY_PATH",
+        "PYTHONPATH",
+        "HSA_OVERRIDE_GFX_VERSION",
+        "ROC_ENABLE_PRE_VEGA",
+        "HSA_ENABLE_SDMA",
+        "HIP_LAUNCH_BLOCKING",
+    ]
+    icd_paths = [p for p in os.environ.get("VK_ICD_FILENAMES", "").split(":") if p]
+    if not icd_paths:
+        for parent in (Path("/usr/share/vulkan/icd.d"), Path("/etc/vulkan/icd.d")):
+            if parent.is_dir():
+                icd_paths.extend(str(p) for p in sorted(parent.glob("*.json")))
+    pacman = shutil.which("pacman")
+    icd_packages = {}
+    if pacman:
+        for icd in icd_paths:
+            icd_packages[icd] = _run_text([pacman, "-Qo", icd])
+    return {
+        "captured_at_unix": time.time(),
+        "uname": {
+            "system": uname.system,
+            "node": uname.node,
+            "release": uname.release,
+            "version": uname.version,
+            "machine": uname.machine,
+            "processor": uname.processor,
+            "raw": " ".join(uname),
+        },
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version.replace("\n", " "),
+        },
+        "packages": {
+            "numpy": np.__version__,
+            "vulkan": _package_version("vulkan"),
+            "pyvkfft": _package_version("pyvkfft"),
+        },
+        "commands": {
+            "glslc": _run_text([shutil.which("glslc") or "glslc", "--version"]) if shutil.which("glslc") else "unavailable",
+            "vulkaninfo_summary": _run_text(["vulkaninfo", "--summary"], timeout=10.0) if shutil.which("vulkaninfo") else "unavailable",
+        },
+        "environment": {key: os.environ.get(key) for key in env_keys if os.environ.get(key) is not None},
+        "vulkan": {
+            "icd_paths": icd_paths,
+            "icd_packages": icd_packages,
+            "device": gpu_device or {},
+        },
+        "generator": {
+            "backend": args.backend,
+            "fft_backend": args.fft_backend if args.backend == "gpu" else "numpy",
+            "argv": sys.argv,
+        },
+    }
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--backend", choices=["cpu", "gpu"], default="cpu", help="truth backend; gpu is not implemented yet")
+    p.add_argument("--backend", choices=["cpu", "gpu"], default="cpu", help="truth backend")
+    p.add_argument(
+        "--fft-backend",
+        choices=["vkfft", "vkfft-vulkan"],
+        default="vkfft-vulkan",
+        help="GPU FFT backend used when --backend gpu",
+    )
     p.add_argument("--N", type=int, default=32, help="grid size per dimension")
     p.add_argument("--steps", type=int, default=200, help="number of solver steps")
     p.add_argument("--save-every", type=int, default=10, help="snapshot stride")
@@ -235,8 +327,6 @@ def validate_snapshot(diag: Dict[str, object], args: argparse.Namespace) -> None
 
 def main() -> None:
     args = parse_args()
-    if args.backend != "cpu":
-        raise SystemExit("make_truth_3d.py currently implements --backend cpu only; GPU/SPV 3D is deferred")
     if args.N < 16:
         raise SystemExit("--N must be at least 16")
     if args.steps < 0:
@@ -245,6 +335,13 @@ def main() -> None:
         raise SystemExit("--save-every must be positive")
     if args.dt <= 0.0 or args.nu0 < 0.0:
         raise SystemExit("--dt must be positive and --nu0 must be nonnegative")
+    if args.backend == "gpu":
+        if args.div_tol < 1e-6:
+            print(f"[truth3d] backend=gpu raising div_tol from {args.div_tol:g} to 1e-6 for fp32 validation")
+            args.div_tol = 1e-6
+        if args.curl_tol < 1e-5:
+            print(f"[truth3d] backend=gpu raising curl_tol from {args.curl_tol:g} to 1e-5 for fp32 validation")
+            args.curl_tol = 1e-5
 
     out_path = args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,6 +357,56 @@ def main() -> None:
     snapshot_set = set(snapshot_steps)
 
     u_hat = init_velocity_hat(args, kx, ky, kz, k2, mask)
+    gpu_backend = None
+    gpu_meta: Dict[str, object] = {}
+    gpu_device: Dict[str, object] = {}
+    if args.backend == "gpu":
+        from vulkan_truth3d_backend import VulkanTruth3DBackend
+
+        print(f"[truth3d] backend=gpu requested fft_backend={args.fft_backend}")
+        print(f"[truth3d] VK_ICD_FILENAMES={os.environ.get('VK_ICD_FILENAMES', '<unset>')}")
+        try:
+            gpu_backend = VulkanTruth3DBackend(
+                args.N,
+                dt=args.dt,
+                nu0=args.nu0,
+                length=args.L,
+                fft_backend=args.fft_backend,
+            )
+        except Exception as exc:
+            raise SystemExit(
+                "[truth3d] backend=gpu unavailable during Vulkan/vkFFT setup: "
+                f"{type(exc).__name__}: {exc}. "
+                "Set VK_ICD_FILENAMES to the RADV ICD, ensure the Vulkan device is visible, "
+                "and run inside the gfx803/Nix environment if that is where the driver stack is exposed."
+            ) from exc
+        gpu_backend.set_initial_u_hat(u_hat)
+        runtime_info = gpu_backend.runtime_info()
+        gpu_device = gpu_backend.device_info()
+        gpu_meta = {
+            "fft_backend": args.fft_backend,
+            "runtime": runtime_info,
+            "device": gpu_device,
+            "spv_shaders": [
+                "complex_copy_3d",
+                "real_to_complex_3d",
+                "complex_to_real_3d",
+                "derivative_hat_3d",
+                "leray_project_3d",
+                "dealias_3d",
+                "curl_3d",
+                "advect_vector_3d",
+                "rhs_projected_ns_3d",
+                "combine_vector_hat_3d",
+            ],
+        }
+        print(
+            "[truth3d] backend=gpu active "
+            f"fft_plan_backend={runtime_info.get('ifft_plan_backend')} "
+            f"device={gpu_device.get('device_name', 'unknown')}"
+        )
+    else:
+        print("[truth3d] backend=cpu active fft_backend=numpy")
     omega_snapshots: List[Array] = []
     velocity_snapshots: List[Array] = []
     energies: List[float] = []
@@ -272,52 +419,65 @@ def main() -> None:
     shell_counts: List[int] = []
     shell_rows: List[Array] = []
 
-    started = time.perf_counter()
-    for step in range(args.steps + 1):
-        if step in snapshot_set:
-            omega_hat = curl_hat(u_hat, kx, ky, kz)
-            omega = ifft_vec(omega_hat)
-            diag = snapshot_diagnostics(
-                u_hat,
-                omega,
-                omega_hat,
-                dx=dx,
-                dt=args.dt,
-                kx=kx,
-                ky=ky,
-                kz=kz,
-                k_radius=k_radius,
-                k_star=k_star,
-            )
-            validate_snapshot(diag, args)
-            omega_snapshots.append(omega.astype(storage_dtype, copy=True))
-            if not args.omit_velocity:
-                velocity_snapshots.append(np.asarray(diag["u"]).astype(storage_dtype, copy=True))
-            energies.append(float(diag["energy"]))
-            enstrophies.append(float(diag["enstrophy"]))
-            max_abs_omega.append(float(diag["max_abs_omega"]))
-            cfl_values.append(float(diag["cfl"]))
-            div_rms_values.append(float(diag["div_rms"]))
-            div_linf_values.append(float(diag["div_linf"]))
-            curl_rel_values.append(float(diag["curl_rel_l2"]))
-            shell_counts.append(int(diag["shell_nonzero_count_at_or_above_k_star"]))
-            shell_rows.append(np.asarray(diag["shell_energy"], dtype=np.float64))
-        if args.progress_every and step % args.progress_every == 0:
-            elapsed = time.perf_counter() - started
-            rate = step / max(elapsed, 1e-12) if step > 0 else 0.0
-            remaining = max(0, int(args.steps) - int(step))
-            eta = remaining / max(rate, 1e-12) if step > 0 else float("inf")
-            eta_text = "unknown" if not math.isfinite(eta) else f"{eta:.2f}s"
-            print(f"[truth3d] step={step}/{args.steps} elapsed={elapsed:.2f}s steps/s={rate:.2f} eta={eta_text}")
-        if step == args.steps:
-            break
-        u_hat = rk2_step(u_hat, kx, ky, kz, k2, mask, args.dt, args.nu0)
+    try:
+        started = time.perf_counter()
+        for step in range(args.steps + 1):
+            if step in snapshot_set:
+                if gpu_backend is not None:
+                    u_hat_for_snapshot = np.asarray(gpu_backend.read_u_hat(), dtype=np.complex128)
+                    omega_hat = np.asarray(gpu_backend.read_omega_hat(), dtype=np.complex128)
+                else:
+                    u_hat_for_snapshot = u_hat
+                    omega_hat = curl_hat(u_hat_for_snapshot, kx, ky, kz)
+                omega = ifft_vec(omega_hat)
+                diag = snapshot_diagnostics(
+                    u_hat_for_snapshot,
+                    omega,
+                    omega_hat,
+                    dx=dx,
+                    dt=args.dt,
+                    kx=kx,
+                    ky=ky,
+                    kz=kz,
+                    k_radius=k_radius,
+                    k_star=k_star,
+                )
+                validate_snapshot(diag, args)
+                omega_snapshots.append(omega.astype(storage_dtype, copy=True))
+                if not args.omit_velocity:
+                    velocity_snapshots.append(np.asarray(diag["u"]).astype(storage_dtype, copy=True))
+                energies.append(float(diag["energy"]))
+                enstrophies.append(float(diag["enstrophy"]))
+                max_abs_omega.append(float(diag["max_abs_omega"]))
+                cfl_values.append(float(diag["cfl"]))
+                div_rms_values.append(float(diag["div_rms"]))
+                div_linf_values.append(float(diag["div_linf"]))
+                curl_rel_values.append(float(diag["curl_rel_l2"]))
+                shell_counts.append(int(diag["shell_nonzero_count_at_or_above_k_star"]))
+                shell_rows.append(np.asarray(diag["shell_energy"], dtype=np.float64))
+            if args.progress_every and step % args.progress_every == 0:
+                elapsed = time.perf_counter() - started
+                rate = step / max(elapsed, 1e-12) if step > 0 else 0.0
+                remaining = max(0, int(args.steps) - int(step))
+                eta = remaining / max(rate, 1e-12) if step > 0 else float("inf")
+                eta_text = "unknown" if not math.isfinite(eta) else f"{eta:.2f}s"
+                print(f"[truth3d] step={step}/{args.steps} elapsed={elapsed:.2f}s steps/s={rate:.2f} eta={eta_text}")
+            if step == args.steps:
+                break
+            if gpu_backend is not None:
+                gpu_backend.step()
+            else:
+                u_hat = rk2_step(u_hat, kx, ky, kz, k2, mask, args.dt, args.nu0)
+    finally:
+        if gpu_backend is not None:
+            gpu_backend.close()
 
     max_shell_len = max(row.size for row in shell_rows)
     shell_energy = np.zeros((len(shell_rows), max_shell_len), dtype=np.float64)
     for i, row in enumerate(shell_rows):
         shell_energy[i, : row.size] = row
 
+    host_provenance = collect_host_provenance(args, gpu_device if args.backend == "gpu" else None)
     meta: Dict[str, object] = {
         "dimension": 3,
         "field": "omega",
@@ -330,6 +490,9 @@ def main() -> None:
         "dealiasing": "2/3",
         "seed": int(args.seed),
         "backend": args.backend,
+        "fft_backend": args.fft_backend if args.backend == "gpu" else "numpy",
+        "gpu": gpu_meta,
+        "host_provenance": host_provenance,
         "forcing": "none",
         "domain_length": float(args.L),
         "axis_order": "z,y,x,component",

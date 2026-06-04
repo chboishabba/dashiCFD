@@ -53,6 +53,21 @@ If these matter, export them from ChatGPT and re-ingest before updating context.
   bridge falsification only; no NS/Clay promotion is implied. Packet lineage
   labels remain deferred until a 3D truth artifact has been consumed by the
   harness.
+- 2026-06-04: added an opt-in `--backend gpu` path for `make_truth_3d.py` via
+  `vulkan_truth3d_backend.py`, vendored `dashiCORE` vkFFT/Vulkan helpers, and
+  3D SPV shaders under `dashiCORE/spv/comp/*_3d.comp`. CPU remains the default;
+  GPU is fail-fast and records device/shader metadata.
+- On this host the GPU truth lane requires explicit RADV ICD selection:
+  `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json`. Zero-step and
+  two-step N=16 GPU smokes reported `fft_plan_backend=vulkan` on
+  `AMD Radeon RX 580 Series (RADV POLARIS10)` with finite velocity/vorticity
+  fields.
+- 2026-06-04: added a diagnostic fp64 Vulkan/vkFFT path for NS harness parity.
+  `scripts/probe_vkfft_fp64.py --N 16` reports `shaderFloat64=true` on the
+  RX580/RADV host and complex128 vkFFT round-trip max error about `1.4e-15`.
+  The sibling `dashi_agda` harness can now request
+  `--diagnostic-backend gpu --diagnostic-precision float64`; this is a
+  debug/parity lane, not the default fp32 truth-solver speed lane.
 - Fix voxel grid sizing in `naw.py` (matplotlib voxels expects edge-sized coordinates, e.g., len+1 along each axis).
 - Add dependency set (`numpy`, `matplotlib`, `scikit-image` if keeping `naw2.py`).
 - Replace `plt.show()` calls with file saves for reliable headless runs.

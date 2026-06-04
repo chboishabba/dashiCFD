@@ -149,14 +149,57 @@ python3 scripts/make_truth_3d.py \
   --out outputs/truth3d/ns3d_N32_seed0.npz
 ```
 
+Opt-in SPV/vkFFT lane using vendored `dashiCORE` Vulkan infrastructure:
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+python3 -u scripts/make_truth_3d.py \
+  --backend gpu \
+  --fft-backend vkfft-vulkan \
+  --N 32 \
+  --steps 200 \
+  --save-every 10 \
+  --dt 0.002 \
+  --nu0 0.001 \
+  --seed 0 \
+  --out outputs/truth3d/ns3d_N32_seed0_gpu.npz
+```
+
+Use the ICD path that exists on the host (`/usr/share/vulkan/icd.d/radeon_icd.json`
+on this machine; some older notes use `radeon_icd.x86_64.json`). On the RX
+580/gfx803 host, first verify the compatibility environment if Vulkan or ROCm
+visibility is uncertain:
+
+```bash
+cd /home/c/Documents/code/__OTHER/gfx803_compat_graph/gfx803_flake_v1
+nix develop .#base
+verify-gfx803-host
+```
+
 The 3D truth lane is separate from the existing 2D DASHI/LES pipeline. It
 writes `omega_snapshots` with shape `(T,N,N,N,3)`, `velocity_snapshots` with
 the same vector shape by default, `steps`, diagnostics, and `meta_json`
 declaring `dimension=3`, periodic boundaries, Leray projection, and 2/3
-dealiasing. The script fails closed when saved fields are non-finite,
+dealiasing. The CPU path is the default; the GPU path is fail-fast and records
+the vkFFT backend, Vulkan device info, and 3D SPV shader list. The script fails
+closed when saved fields are non-finite,
 divergence/curl checks fail, CFL exceeds the configured bound, or fewer than
-five vorticity shells are nonzero at or above `K_star`. Packet lineage labels
-are intentionally deferred until after the 3D physical bridge harness runs.
+five vorticity shells are nonzero at or above `K_star`. GPU validation uses
+fp32-appropriate divergence/curl tolerance floors and prints the actual
+`fft_plan_backend` plus Vulkan device name so CPU/GPU execution is auditable.
+Packet lineage labels are intentionally deferred until after the 3D physical
+bridge harness runs.
+
+FP64 GPU parity probe for diagnostics:
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json \
+python3 scripts/probe_vkfft_fp64.py --N 16
+```
+
+On the RX580/RADV host this reports `shaderFloat64=true` and complex128 vkFFT
+round-trip error around `1e-15`. The fp64 path is a diagnostic/parity lane, not
+the default speed lane; the 3D truth solver still defaults to fp32 GPU kernels.
 
 No truth NPZ is required for CLI validation:
 
@@ -279,8 +322,9 @@ Recent GPU/vkFFT runs (user side):
 - `scripts/plot_enstrophy.py` — plot enstrophy from JSON or CSV logs.
 - `scripts/compare_les_gpu_cpu.py` — sanity check GPU LES vs CPU baseline.
 - `scripts/validate_gpu_truth.py` — validate GPU LES against stored truth.
-- `scripts/make_truth_3d.py` — CPU pseudo-spectral 3D periodic incompressible
-  truth generator for velocity/vorticity bridge artifacts.
+- `scripts/make_truth_3d.py` — pseudo-spectral 3D periodic incompressible
+  truth generator for velocity/vorticity bridge artifacts; defaults to CPU and
+  has an opt-in SPV/vkFFT GPU lane via `--backend gpu`.
 - `scripts/ns_ev5_shell_enstrophy.py` — convert `make_truth.py` snapshots into
   shell-enstrophy and EV5 candidate diagnostic bundles.
 - `scripts/run_sweep.py` / `scripts/perf_sampler.py` — parameter sweeps and perf sampling.

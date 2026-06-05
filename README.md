@@ -76,6 +76,741 @@ net-residue physical-amplitude proxy does not clear the sign-cycle gate:
 physical-small fraction is `0.3423412506059137` and
 `sigma_physical_cycle_fit = -1.1215088689186317`.
 
+Sprint 54 no-2-cycle resolution/cadence audit:
+
+```bash
+python3 scripts/ns_sprint54_no2cycle_resolution_cadence_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint54_no2cycle_resolution_cadence_gpu_audit
+```
+
+Observed result: `NO2CYCLE_PROXY_OVERCONSERVATIVE_STRETCH_SMALL`.
+The Sprint 53 material-mass proxy remains bad, but shell/time direct
+`omega dot S omega` evidence reports `small_fraction_by_stretch =
+0.9751575375666505`. Cadence remains `single_cadence_unresolved`; packet-local
+stretch attribution still requires packet support masks.
+
+Sprint 55 Lagrangian accumulated stretch-action audit:
+
+```bash
+python3 scripts/ns_sprint55_lagrangian_stretch_action_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint55_lagrangian_stretch_action_gpu_audit
+```
+
+Observed result: `LAGRANGIAN_STRETCH_ACTION_SMALL_DIAGNOSTIC`.
+According to Sprint 55, the Sprint 54 stretch diagnostic should be read as
+Lagrangian accumulated stretch-action evidence, not as color strings or
+packet-color counts. The six-run N32/N64 batch reports
+`action_small_fraction = 0.9985242030696576`, `dangerous_lineage_count = 5`,
+and `sigma_action_fit = -0.5102412568825301`. It remains diagnostic only:
+weighted action summability does not close, cadence and shell-boundary
+sensitivity are unresolved, packet-local support masks are unavailable, and all
+governance/promotion flags remain false.
+
+Sprint 56 packet-local accumulated stretch-action audit:
+
+```bash
+python3 scripts/ns_sprint56_packet_local_stretch_action_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint56_packet_local_stretch_action_gpu_audit
+```
+
+Observed result: `PACKET_LOCAL_ACTION_SUMMABILITY_BLOCKED`.
+Sprint 56 reconstructs packet-local support masks from Sprint 49 `K_cell`
+packet IDs and computes accumulated positive stretch action plus
+direction-change separation on those masks. The six-run N32/N64 batch reports
+`packet_local_available_fraction = 1.0`, `action_small_fraction =
+0.8108028335301063`, `dangerous_lineage_count = 641`, and
+`sigma_packet_local_action_fit = -0.4822543927548197`. The packet-local audit
+therefore blocks the current accumulated-action route under current
+cadence/resolution; all promotion flags remain false.
+
+Sprint 57 vessel/action reconciliation audit:
+
+```bash
+python3 scripts/ns_sprint57_vessel_action_reconciliation_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint57_vessel_action_reconciliation_gpu_audit
+```
+
+Observed result: `PACKET_ACTION_UNDERCOUNTS_COVERED_STRETCH`.
+The six-run N32/N64 batch reports `epsilon_raw_positive_vs_covered =
+-0.8161321565334568`, `epsilon_raw_positive_vs_global =
+-0.9608719590659198`, and `epsilon_normalized_positive_vs_global =
+113.58553013012235`. The current packet-local obstruction is therefore a
+normalized packet-action versus raw vessel-action mismatch, not simple
+Euclidean packet double-counting; all promotion flags remain false.
+
+Sprint 58 normalized packet-action inflation audit:
+
+```bash
+python3 scripts/ns_sprint58_normalized_action_inflation_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint58_normalized_action_inflation_gpu_audit
+```
+
+Observed result: `NORMALIZED_ACTION_NONADDITIVE_RATIO_INFLATION`.
+The six-run N32/N64 batch reports
+`sum_ratios_over_ratio_of_sums_covered = 4904.346096600663`,
+`sum_ratios_over_ratio_of_sums_global = 11471.817018880183`, and
+`low_enstrophy_denominator_fraction = 0.012394729693018202`. The Sprint 56
+packet-normalized `A+` ledger is therefore not vessel-additive; all promotion
+flags remain false.
+
+Sprint 59 raw additive packet-stretch audit:
+
+```bash
+python3 scripts/ns_sprint59_raw_packet_stretch_action_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --out-dir outputs/sprint59_raw_packet_stretch_action_gpu_audit
+```
+
+This producer computes the vessel-additive packet quantity
+`sum_P max(omega dot S omega, 0) dx dt` by voxelwise positive parts, plus
+negative/net/raw weighted shell summaries. It is the replacement measurement
+for packet-normalized ratio summability; all promotion flags remain false.
+
+Observed six-run N32/N64 result:
+`route_decision = RAW_ACTION_SUMMABILITY_BLOCKED`,
+`sigma_raw_action_fit = -0.023179743665209647`, and
+`A_raw_positive_total = 6825780.534479305`.  This is a near-flat raw-action
+spectrum under the current Euclidean `K_cell` packet shelling.  The normalized
+packet-ratio obstruction from Sprint 56/58 is no longer the governing object;
+the active NS blocker is whether raw positive vortex-stretch action becomes
+summable after using an action-preserving cascade geometry.
+
+Current NS planning surface after Sprint 59:
+
+```text
+correct additive source:     A_raw_plus = integral max(omega dot S omega, 0) dx dt
+current shelling:            Euclidean K_cell packet geometry
+current fit:                 sigma_raw_action_fit ~= -0.023
+closure threshold:           sigma_raw_action_fit > 0.5
+promotion status:            false
+next decisive audit:         BT/smoothed shell reassignment with action conservation
+```
+
+The next audit must not merely relabel packets.  A corrected shell assignment
+is admissible only if it preserves the physical raw-stretch action while
+changing the shell distribution:
+
+```text
+sum_K A_raw_plus_corrected(K) ~= sum_K A_raw_plus_euclidean(K)
+```
+
+The conservation gate must be checked per assignment scheme, per run/time, and
+globally:
+
+```text
+abs(sum_K A_raw_plus_reassigned(run,time,K) - A_raw_plus_reference(run,time))
+  / (abs(A_raw_plus_reference(run,time)) + eps)
+  <= conservation_tolerance
+```
+
+The same consistency check should be reported for `A_raw_negative` and
+`A_raw_net` whenever those ledgers are reassigned.  Smoothed shell windows must
+form a partition of unity over each source action contribution; BT/ultrametric
+packet addresses must report unassigned and overassigned action fractions.  A
+pooled improvement in `sigma_raw_action_fit` is not enough if individual
+N/seed/run groups fail conservation or remain flat.
+
+Sprint 60 route decisions should separate conservation failures from real
+diagnostic progress:
+
+```text
+RAW_ACTION_REASSIGNMENT_SOURCE_UNAVAILABLE
+RAW_ACTION_REASSIGNMENT_CONSERVATION_FAILED
+RAW_ACTION_REASSIGNMENT_NON_PARTITION_WINDOW_FAILED
+RAW_ACTION_REASSIGNMENT_FLAT_BLOCKED
+RAW_ACTION_REASSIGNMENT_SUMMABILITY_PROMISING_DIAGNOSTIC
+```
+
+If a BT/ultrametric or smoothed shell assignment improves `sigma_raw_action_fit`
+while preserving total raw action, the flat Sprint 59 result is evidence of
+Euclidean shell-accounting mismatch.  If the fit stays flat under
+action-preserving reassignment, the ternary source-budget route remains blocked
+and the NS lane should pivot toward direction-coherence/no-concentration
+geometry rather than more color-string diagnostics.
+
+BT, p-adic, Monster, and green/zero language is currently an organizing
+hypothesis for candidate cascade coordinates, not theorem-grade evidence.  It
+becomes proof-relevant only after the reassignment supplies a concrete
+action-preserving map and a bounded comparison to the physical raw
+`omega dot S omega` ledger.
+
+Sprint 60 raw-action shell reassignment audit:
+
+```bash
+python3 scripts/ns_sprint60_raw_action_reassignment_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --raw-action-csv \
+    outputs/sprint59_raw_packet_stretch_action_gpu_audit/ns_raw_packet_stretch_action.csv \
+  --out-dir outputs/sprint60_raw_action_reassignment_gpu_audit
+```
+
+Observed result: `RAW_ACTION_REASSIGNMENT_FLAT_BLOCKED`.  The audit
+redistributes the same Sprint 59 raw action ledger through three assignment
+schemes and requires per-run/time plus global conservation before interpreting
+any shell fit.  All schemes conserve raw action, but all remain far below the
+`sigma_raw_action_fit > 0.5` gate:
+
+```text
+euclidean_K_cell  sigma = -0.023179743665209647
+smoothed_shell    sigma = -0.022555170588204942
+bt_ultrametric    sigma = -0.03123173737299591
+```
+
+The provisional BT/ultrametric reassignment therefore does not rescue the raw
+source-budget route on the current Sprint 49/59 N32/N64 evidence.  The next NS
+diagnostic should inspect raw-red lineage anatomy and robustness rather than
+assuming shell metric mismatch is the dominant cause.
+
+Sprint 61 raw-red direction-coherence anatomy audit:
+
+```bash
+python3 scripts/ns_sprint61_raw_red_direction_coherence_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --raw-action-csv \
+    outputs/sprint59_raw_packet_stretch_action_gpu_audit/ns_raw_packet_stretch_action.csv \
+  --out-dir outputs/sprint61_raw_red_direction_coherence_gpu_audit
+```
+
+Observed result: `RAW_RED_DIRECTION_INCOHERENT_CONCENTRATION_BLOCKED`.
+The producer selects the high raw-red population by `weighted_A_raw_positive`,
+rebuilds packet masks from Sprint 49 truth, and measures vorticity-direction
+coherence, direction-gradient, Beltrami-defect, and parent-lineage metadata.
+On the six-run N32/N64 batch:
+
+```text
+selected_high_raw_red_count = 1471
+incoherent_packet_count = 1451
+incoherent_packet_fraction = 0.9864038069340585
+direction_coherence_mean_selected = 0.5295134456542706
+direction_lipschitz_proxy_mean_selected = 13.970541573972843
+```
+
+Under the current packet mask / cadence / coherence-threshold proxy, the high
+raw-red packets are not CFM-friendly coherent tubes.  This does not prove a
+continuum concentration theorem, but it blocks the immediate DASHI/CFM rescue
+of the raw source-budget route on current evidence.  The remaining NS checks
+are robustness checks: denser cadence, higher resolution, and a more
+theorem-grade direction-coherence proxy.
+
+Sprint 62 direction-coherence robustness audit:
+
+```bash
+python3 scripts/ns_sprint62_direction_coherence_robustness_audit.py \
+  --sprint61-csv \
+    outputs/sprint61_raw_red_direction_coherence_gpu_audit/ns_raw_red_direction_coherence.csv \
+  --out-dir outputs/sprint62_direction_coherence_robustness_gpu_audit
+```
+
+Observed result:
+`DIRECTION_COHERENCE_INCOHERENCE_ROBUST_ON_AVAILABLE_DATA`.  The audit
+reclassifies the Sprint 61 packet anatomy across top-population fractions
+`0.01, 0.05, 0.10, 0.25, 1.0` and coherence thresholds
+`0.60, 0.70, 0.80, 0.90`.  Every tested threshold/top-fraction row remains
+incoherent on the available selected population.  By run:
+
+```text
+sprint49_material_parent_N64_seed0_gpu: incoherent_fraction = 1.0
+sprint49_material_parent_N64_seed1_gpu: incoherent_fraction = 1.0
+```
+
+Follow-up GPU ladder runs materialized one higher-resolution and one
+dense-cadence check:
+
+```text
+N128 seed0, save-every=10:
+  Sprint 59 route = RAW_ACTION_SUMMABILITY_BLOCKED
+  sigma_raw = -0.015597324361506952
+  Sprint 61 route = RAW_RED_DIRECTION_INCOHERENT_CONCENTRATION_BLOCKED
+  Sprint 62 route = DIRECTION_COHERENCE_INCOHERENCE_ROBUST_ON_AVAILABLE_DATA
+
+N64 seed0, save-every=2:
+  Sprint 59 route = RAW_ACTION_SUMMABILITY_BLOCKED
+  sigma_raw = -0.03440204529464993
+  Sprint 61 route = RAW_RED_DIRECTION_INCOHERENT_CONCENTRATION_BLOCKED
+  Sprint 62 route = DIRECTION_COHERENCE_INCOHERENCE_ROBUST_ON_AVAILABLE_DATA
+```
+
+The N128 and dense-cadence checks strengthen the current negative diagnostic,
+but they still do not prove a continuum concentration theorem. N1024-scale
+evidence and a theorem-grade direction-coherence proxy remain open. Sprint 61
+now caches frame-wide direction fields/gradients once per saved frame, so the
+coherence pass is no longer the dominant runtime; GPU work should prioritize
+truth generation, spectral derivatives, and compact packet-bin accumulation.
+
+Sprint 63 cross-shell replenishment contractivity audit:
+
+```bash
+python3 scripts/ns_sprint63_cross_shell_replenishment_contractivity_audit.py \
+  --inputs \
+    outputs/sprint49_material_parent_N32_seed0_gpu \
+    outputs/sprint49_material_parent_N32_seed1_gpu \
+    outputs/sprint49_material_parent_N32_seed2_gpu \
+    outputs/sprint49_material_parent_N32_seed3_gpu \
+    outputs/sprint49_material_parent_N64_seed0_gpu \
+    outputs/sprint49_material_parent_N64_seed1_gpu \
+  --raw-action-csv \
+    outputs/sprint59_raw_packet_stretch_action_gpu_audit/ns_raw_packet_stretch_action.csv \
+  --out-dir outputs/sprint63_cross_shell_replenishment_contractivity_gpu_audit
+```
+
+Sprint 63 is the next DASHI-native theorem fork after Sprint 60 shell
+reassignment and Sprint 61/62 direction coherence both stayed blocked.  It
+joins Sprint 49 material parent edges to Sprint 59 raw-action packet ledgers
+and asks whether cross-shell or adjacent-shell replenishment is non-amplifying:
+the child packet's raw positive action is compared with the parent packet's
+available raw positive action, scaled by the Sprint 49 credited-mass fraction.
+
+The producer reports edge, by-`K`, and by-transition-state surfaces:
+
+```text
+parent_action_budget = A_raw_positive(parent) * credited_mass / parent_mass
+contractivity_ratio  = A_raw_positive(child) / (parent_action_budget + eps)
+```
+
+Rows with `contractivity_ratio <= 1` are contractive under this diagnostic
+ledger.  Rows with ratio above one are replenishment-amplifying and block the
+candidate theorem unless they can be discharged by a stronger admissibility or
+defect argument.  The script preserves multi-parent Sprint 49 edges directly;
+it does not use Sprint 61's selected high-red one-row parent map.
+
+Route decisions:
+
+```text
+CROSS_SHELL_REPLENISHMENT_SOURCE_UNAVAILABLE
+CROSS_SHELL_REPLENISHMENT_NO_EDGES
+CROSS_SHELL_REPLENISHMENT_CONTRACTIVE_ON_AVAILABLE_DATA
+CROSS_SHELL_REPLENISHMENT_MIXED
+CROSS_SHELL_REPLENISHMENT_NONCONTRACTIVE_BLOCKED
+```
+
+This is a diagnostic surface for the formal target
+`AdjacentCrossShellReplenishmentSummable`: support non-creation plus admissible
+parent transfer plus defect/action non-amplification should imply that
+cross-shell parent credit cannot sustain unbounded raw-red action.  Sprint 63
+does not prove support non-creation, defect monotonicity, stretch absorption,
+no finite-time blowup, or any Clay/NS promotion.
+
+Observed six-run N32/N64 result:
+`CROSS_SHELL_REPLENISHMENT_MIXED`, but strongly noncontractive under the raw
+parent-budget diagnostic:
+
+```text
+edge_count = 26150
+available_parent_action_edge_count = 25505
+contractive_edge_count = 1192
+noncontractive_edge_fraction = 0.9532640658694373
+contractivity_ratio_total = 2.7665497780287076
+weighted_contractivity_ratio_total = 2.9828906939689044
+support_created_fraction_proxy_mean = 0.603752604523159
+```
+
+The N128 and dense-cadence follow-ups agree:
+
+```text
+N128 seed0:
+  route = CROSS_SHELL_REPLENISHMENT_MIXED
+  noncontractive_edge_fraction = 0.9987681013676589
+  contractivity_ratio_total = 4.371227592340793
+  weighted_contractivity_ratio_total = 5.806885413286424
+
+N64 seed0, save-every=2:
+  route = CROSS_SHELL_REPLENISHMENT_MIXED
+  noncontractive_edge_fraction = 0.9901806026277914
+  contractivity_ratio_total = 2.6548745195597747
+  weighted_contractivity_ratio_total = 2.8200893072403987
+```
+
+This blocks the simple raw-action parent-credit contractivity theorem on
+current artifacts.  A future formal proof would need a stronger defect norm,
+support non-creation hypothesis, or admissibility quotient than the raw
+positive-action budget used here.  Without that stronger structure, the current
+DASHI NS source-budget route is diagnostically exhausted; the remaining
+proof-facing paths are a different CFM/BKM/concentration-compactness bridge or
+the independent YM lane.
+
+Post-Sprint 63 NS verdict:
+
+```text
+NS source-budget route: DIAGNOSTICALLY_EXHAUSTED_ON_CURRENT_ARTIFACTS
+  normalized packet action: non-additive, Jensen-inflated
+  raw action shell summability: flat, sigma ~= -0.02 to -0.03
+  BT/smoothed reassignment: action-preserving but still flat
+  CFM direction-coherence proxy: incoherent on N64, dense N64, N128
+  cross-shell parent-budget contractivity: noncontractive, 2.7x-4.4x total ratio
+```
+
+The next NS route is therefore a norm switch rather than another
+color-string/shell/action-budget diagnostic.  Sprint 64 aligns the DASHI
+`Overflow` surface with the CKN/ESS critical concentration picture:
+
+```text
+grounded = local scale-critical concentration below diagnostic epsilon
+plateau  = near diagnostic epsilon
+ascended = above diagnostic epsilon / candidate concentration site
+```
+
+Current truth artifacts contain `velocity_snapshots` but no pressure field.
+Sprint 64 should therefore emit a velocity-only local `L3` concentration audit
+and explicitly route as pressure-reconstruction-missing until the
+`|p|^(3/2)` term is available.  This is a CKN-aligned diagnostic surface only;
+it is not a CKN epsilon-regularity certificate and carries no Clay/NS
+promotion.
+
+Sprint 64 CKN/local critical concentration audit:
+
+```bash
+python3 scripts/ns_sprint64_ckn_local_critical_concentration_audit.py \
+  --inputs \
+    outputs/truth3d/ns3d_N32_seed0_gpu.npz \
+    outputs/truth3d/ns3d_N32_seed1_gpu.npz \
+    outputs/truth3d/ns3d_N32_seed2_gpu.npz \
+    outputs/truth3d/ns3d_N32_seed3_gpu.npz \
+    outputs/truth3d/ns3d_N64_seed0_gpu.npz \
+    outputs/truth3d/ns3d_N64_seed1_gpu.npz \
+  --out-dir outputs/sprint64_ckn_local_critical_concentration_gpu_audit \
+  --scales 8 16 \
+  --epsilon-critical 0.01 \
+  --plateau-fraction 0.5
+```
+
+Observed six-run N32/N64 result:
+`LOCAL_CRITICAL_CONCENTRATION_PRESSURE_RECONSTRUCTION_MISSING`.
+The audit produced 18720 velocity-only parabolic block rows, with
+`ascended_fraction = 0.9642628205128205`,
+`max_local_critical_quantity = 0.5370477381890987`, and
+`max_local_concentration_ratio = 53.704773818909864` under the diagnostic
+`epsilon_critical = 0.01`.
+
+The N128 and dense-cadence follow-ups also route as pressure-missing:
+
+```text
+N128 seed0:
+  row_count = 59904
+  ascended_fraction = 0.8740818643162394
+  max_local_concentration_ratio = 10.67887709906586
+
+N64 seed0, save-every=2:
+  row_count = 35136
+  ascended_fraction = 0.926542577413479
+  max_local_concentration_ratio = 24.25368457905771
+```
+
+These numbers are not a CKN verdict.  They say only that the velocity-side
+critical concentration surface is now measurable and currently nontrivial, but
+the full CKN quantity is unavailable until pressure is reconstructed or stored.
+
+Sprint 65 pressure reconstruction target:
+
+```text
+Delta p = - sum_ij (partial_i u_j) (partial_j u_i)
+mean(p) = 0 per periodic frame
+```
+
+Sprint 65 should append `pressure_snapshots` to pressure-augmented truth NPZs
+and report Poisson residual/gauge diagnostics before rerunning Sprint 64 with
+the pressure term present.  This still does not promote CKN regularity; it only
+removes the artifact-level `pressure_reconstruction_missing` blocker.
+
+Sprint 65 pressure reconstruction:
+
+```bash
+python3 scripts/ns_sprint65_pressure_reconstruction.py \
+  --inputs \
+    outputs/truth3d/ns3d_N32_seed0_gpu.npz \
+    outputs/truth3d/ns3d_N32_seed1_gpu.npz \
+    outputs/truth3d/ns3d_N32_seed2_gpu.npz \
+    outputs/truth3d/ns3d_N32_seed3_gpu.npz \
+    outputs/truth3d/ns3d_N64_seed0_gpu.npz \
+    outputs/truth3d/ns3d_N64_seed1_gpu.npz \
+  --out-dir outputs/sprint65_pressure_reconstruction_gpu_audit \
+  --overwrite
+```
+
+Observed six-run N32/N64 result:
+
+```text
+max_poisson_relative_residual_rms = 3.5409688067143674e-16
+pressure_gauge = zero_mean_per_frame
+promotion_status = NO_PROMOTION_SPRINT65_PRESSURE_RECONSTRUCTION_DIAGNOSTIC
+```
+
+The pressure-present Sprint 64 rerun advances beyond the missing-pressure
+route:
+
+```bash
+python3 scripts/ns_sprint64_ckn_local_critical_concentration_audit.py \
+  --inputs \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed0_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed1_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed2_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed3_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N64_seed0_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N64_seed1_gpu_pressure.npz \
+  --out-dir outputs/sprint64_ckn_local_critical_concentration_pressure_gpu_audit \
+  --scales 8 16 \
+  --epsilon-critical 0.01 \
+  --plateau-fraction 0.5
+```
+
+Observed pressure-present route:
+
+```text
+route_decision = LOCAL_CRITICAL_CONCENTRATION_MIXED
+row_count = 18720
+ascended_fraction = 0.9890491452991453
+max_local_concentration_ratio = 60.83081878566949
+```
+
+N128 seed0 and dense N64 seed0 also route as mixed:
+
+```text
+N128 seed0:
+  ascended_fraction = 0.9127771100427351
+  max_local_concentration_ratio = 12.148072897848532
+
+N64 seed0, save-every=2:
+  ascended_fraction = 0.9361338797814208
+  max_local_concentration_ratio = 27.578561542239555
+```
+
+Sprint 65 therefore removes the artifact-level pressure blocker, but it does
+not close the CKN route.  The next CKN-facing gate is threshold/proxy
+calibration and theorem-grade interpretation of the pressure-inclusive local
+concentration surface.
+
+Sprint 66 CKN r-sweep calibration target:
+
+```text
+C(r, x0, t0) = r^-2 integral_Q(r,x0,t0) (|u|^3 + |p|^(3/2)) dx dt
+```
+
+The Sprint 64/65 fixed-block ascended fractions should not be read as a
+near-singularity verdict.  Sprint 66 should sample candidate hot spots and
+track the scale-normalized pressure-inclusive quantity over several radii. The
+diagnostic question is whether `C(r)` decays, stays flat, or increases as the
+audit zooms inward around the hottest packet/field centres.
+
+Sprint 66 CKN r-sweep calibration:
+
+```bash
+python3 scripts/ns_sprint66_ckn_r_sweep_calibration.py \
+  --inputs \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed0_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed1_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed2_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed3_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N64_seed0_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N64_seed1_gpu_pressure.npz \
+  --candidate-csv outputs/sprint59_raw_packet_stretch_action_gpu_audit/ns_raw_packet_stretch_action.csv \
+  --out-dir outputs/sprint66_ckn_r_sweep_calibration_gpu_audit \
+  --r-cells 2 4 8 16 \
+  --epsilon-grid 0.01 0.05 0.1 0.5 1.0 \
+  --top-hotspots 10
+```
+
+Route decisions:
+
+```text
+CKN_R_SWEEP_SOURCE_UNAVAILABLE
+CKN_R_SWEEP_NO_HOTSPOTS
+CKN_R_SWEEP_PRESSURE_RECONSTRUCTION_MISSING
+CKN_R_SWEEP_SUBCRITICAL_ON_SAMPLED_HOTSPOTS
+CKN_R_SWEEP_DECAYS_UNDER_ZOOM
+CKN_R_SWEEP_MIXED
+CKN_R_SWEEP_CRITICAL_BLOCKED
+```
+
+This remains a DNS/proxy calibration surface.  It does not apply a CKN
+epsilon-regularity theorem, prove a suitable weak solution bridge, establish
+continuum uniformity, prove no finite-time blowup, or promote Clay/NS.
+
+Observed Sprint 66 results:
+
+```text
+six-run N32/N64:
+  route_decision = CKN_R_SWEEP_DECAYS_UNDER_ZOOM
+  row_count = 1200
+  hotspot_count = 60
+  ascended_fraction = 0.43666666666666665
+  decaying_hotspot_count = 60
+  concentrating_hotspot_count = 0
+  mean_log_slope_dlogC_dlogr = 0.8891490092755248
+
+N128 seed0:
+  route_decision = CKN_R_SWEEP_DECAYS_UNDER_ZOOM
+  row_count = 250
+  hotspot_count = 10
+  ascended_fraction = 0.116
+  decaying_hotspot_count = 10
+  concentrating_hotspot_count = 0
+  mean_log_slope_dlogC_dlogr = 1.2761705831944667
+
+N64 seed0, save-every=2:
+  route_decision = CKN_R_SWEEP_DECAYS_UNDER_ZOOM
+  row_count = 200
+  hotspot_count = 10
+  ascended_fraction = 0.125
+  decaying_hotspot_count = 10
+  concentrating_hotspot_count = 0
+  mean_log_slope_dlogC_dlogr = 1.2046696180516625
+```
+
+Sprint 67B CKN uniformity audit:
+
+```bash
+python3 scripts/ns_sprint67_ckn_uniformity_audit.py \
+  --inputs \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed0_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed1_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed2_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N32_seed3_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N64_seed0_gpu_pressure.npz \
+    outputs/sprint65_pressure_reconstruction_gpu_audit/ns3d_N64_seed1_gpu_pressure.npz \
+  --sprint64-csv outputs/sprint64_ckn_local_critical_concentration_pressure_gpu_audit/ns_local_critical_concentration.csv \
+  --out-dir outputs/sprint67_ckn_uniformity_gpu_audit \
+  --r-cells 2 4 8 16 \
+  --epsilon-critical 0.01
+```
+
+Sprint 67B removes the top-hotspot selection bias by replaying fixed-block
+Sprint 64 ascended cylinders, computing pressure-inclusive `C(r)` r-sweeps at
+each candidate centre, and clustering adjacent ascended blocks.
+
+Route decisions:
+
+```text
+CKN_UNIFORM_DECAY_SUPPORTED
+CKN_LOCALIZED_PERSISTENT_PLATEAU
+CKN_CONCENTRATION_CANDIDATE_FOUND
+CKN_PRESSURE_DOMINATED_ARTIFACT
+CKN_INCONCLUSIVE_NEEDS_HIGHER_N
+CKN_UNIFORMITY_SOURCE_UNAVAILABLE
+```
+
+This remains a DNS/proxy uniformity surface. It does not apply CKN epsilon
+regularity, prove suitable weak-solution status, establish continuum
+uniformity, prove no finite-time blowup, or promote Clay/NS.
+
+Observed bounded six-run Sprint 67B result:
+
+```text
+route_decision = CKN_UNIFORM_DECAY_SUPPORTED
+cylinder_count = 1536
+cluster_count = 120
+decaying_count = 1536
+flat_count = 0
+concentrating_count = 0
+persistent_cluster_count = 0
+pressure_fraction_max = 0.13074814940071125
+max_C_total_N32 = 0.6157542190448191
+max_C_total_N64 = 0.2939492011581624
+max_ckn_grows_with_N = false
+```
+
+These r-sweeps demote the fixed-block Sprint 64/65 ascended fractions: sampled
+hot spots decay under zoom rather than concentrating.  This is favorable
+CKN-aligned diagnostic evidence for the available DNS artifacts, not a
+theorem-grade CKN certificate.
+
+R/G/B packet-thread volume visualization:
+
+```bash
+python3 scripts/ns_rgb_thread_volume_visualizer.py \
+  --input outputs/sprint49_material_parent_N64_seed0_gpu \
+  --out-dir outputs/rgb_thread_volume_visuals \
+  --time latest \
+  --alpha 0.30 \
+  --max-points 80000 \
+  --background transparent
+```
+
+The visualizer reconstructs Sprint 49 `K_cell` packet masks, stores empty/nil
+cells as `NaN` in the exported volume, and renders plus/red, zero/green, and
+minus/blue packet voxels at the requested opacity.  Current Sprint 49 child
+state tables contain plus/minus but no zero rows, so green is supported by the
+tool but absent in the generated six-run child-state images.
+
+To animate the R/G/B packet volume over all available material-parent times:
+
+```bash
+python3 scripts/ns_rgb_thread_volume_visualizer.py \
+  --input outputs/sprint49_material_parent_N64_seed0_gpu \
+  --out-dir outputs/rgb_thread_volume_visuals \
+  --all-times \
+  --animation-format both \
+  --fps 6 \
+  --alpha 0.30 \
+  --max-points 80000 \
+  --background transparent
+```
+
+After Sprint 59, action-derived trits can be visualized with:
+
+```bash
+python3 scripts/ns_rgb_thread_volume_visualizer.py \
+  --input outputs/sprint49_material_parent_N64_seed0_gpu \
+  --out-dir outputs/rgb_thread_volume_visuals \
+  --all-times \
+  --trit-source raw_action \
+  --raw-action-csv outputs/sprint59_raw_packet_stretch_action_gpu_audit/ns_raw_packet_stretch_action.csv \
+  --raw-action-threshold 50 \
+  --animation-format both \
+  --alpha 0.30
+```
+
 ## Vulkan GPU commands
 
 Compile SPIR-V (preferred path `dashiCORE/spv/comp` -> `dashiCORE/spv`):

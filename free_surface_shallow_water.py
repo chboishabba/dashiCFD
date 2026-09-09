@@ -75,7 +75,6 @@ def make_hull_mask(grid: Grid) -> np.ndarray:
     x = (np.arange(grid.nx) + 0.5) * grid.dx - grid.lx / 2.0
     y = (np.arange(grid.ny) + 0.5) * grid.dy - grid.ly / 2.0
     X, Y = np.meshgrid(x, y)
-    # Frigate-like slender ellipse: intentionally geometry-proxy, not a naval CAD hull.
     return (X / 28.0) ** 2 + (Y / 5.0) ** 2 <= 1.0
 
 
@@ -106,7 +105,6 @@ def _reflect_y(U: np.ndarray) -> np.ndarray:
 
 
 def step(U: np.ndarray, solid: np.ndarray, grid: Grid, dt: float) -> np.ndarray:
-    # Transmissive outer boundary through edge replication.
     P = np.pad(U, ((0, 0), (1, 1), (1, 1)), mode="edge")
     S = np.pad(solid, ((1, 1), (1, 1)), mode="constant", constant_values=False)
 
@@ -114,9 +112,9 @@ def step(U: np.ndarray, solid: np.ndarray, grid: Grid, dt: float) -> np.ndarray:
     R = P[:, 1:-1, 1:]
     sl = S[1:-1, :-1]
     sr = S[1:-1, 1:]
-    # Reflect fluid state at fluid/solid x faces; solid/solid flux is zero.
-    Lx = np.where(sr[None, ...] & ~sl[None, ...], _reflect_x(L), L)
-    Rx = np.where(sl[None, ...] & ~sr[None, ...], _reflect_x(R), R)
+    # At a fluid/solid face, mirror the fluid state onto the solid side.
+    Lx = np.where((sl & ~sr)[None, ...], _reflect_x(R), L)
+    Rx = np.where((sr & ~sl)[None, ...], _reflect_x(L), R)
     Fx = rusanov_x(Lx, Rx)
     Fx[:, sl & sr] = 0.0
 
@@ -124,8 +122,8 @@ def step(U: np.ndarray, solid: np.ndarray, grid: Grid, dt: float) -> np.ndarray:
     T = P[:, 1:, 1:-1]
     sb = S[:-1, 1:-1]
     st = S[1:, 1:-1]
-    By = np.where(st[None, ...] & ~sb[None, ...], _reflect_y(B), B)
-    Ty = np.where(sb[None, ...] & ~st[None, ...], _reflect_y(T), T)
+    By = np.where((sb & ~st)[None, ...], _reflect_y(T), B)
+    Ty = np.where((st & ~sb)[None, ...], _reflect_y(B), T)
     Fy = rusanov_y(By, Ty)
     Fy[:, sb & st] = 0.0
 
@@ -154,15 +152,14 @@ def diagnostics(U: np.ndarray, U0: np.ndarray, solid: np.ndarray, grid: Grid, cf
     potential = float(0.5 * RHO_WATER * G * np.sum(h[wet] ** 2) * cell_area)
     eta = np.where(wet, h - cfg.depth, 0.0)
 
-    # Hydrostatic wall-load proxy from fluid cells adjacent to the hull mask.
     fluid = ~solid
     left_solid = np.roll(solid, 1, axis=1)
     right_solid = np.roll(solid, -1, axis=1)
     down_solid = np.roll(solid, 1, axis=0)
     up_solid = np.roll(solid, -1, axis=0)
     p = 0.5 * RHO_WATER * G * h * h
-    fx = float(np.sum(p[fluid & left_solid]) * grid.dy - np.sum(p[fluid & right_solid]) * grid.dy)
-    fy = float(np.sum(p[fluid & down_solid]) * grid.dx - np.sum(p[fluid & up_solid]) * grid.dx)
+    force_x = float(np.sum(p[fluid & left_solid]) * grid.dy - np.sum(p[fluid & right_solid]) * grid.dy)
+    force_y = float(np.sum(p[fluid & down_solid]) * grid.dx - np.sum(p[fluid & up_solid]) * grid.dx)
 
     receipt_basis = {
         "model": "2d_saint_venant_rusanov_v1",
@@ -175,8 +172,8 @@ def diagnostics(U: np.ndarray, U0: np.ndarray, solid: np.ndarray, grid: Grid, cf
         "seconds": cfg.seconds,
         "mass_relative_error": (mass - mass0) / max(abs(mass0), 1.0),
         "max_abs_eta_m": float(np.max(np.abs(eta))),
-        "hull_force_x_N": fx,
-        "hull_force_y_N": fy,
+        "hull_force_x_N": force_x,
+        "hull_force_y_N": force_y,
     }
     digest = hashlib.sha256(json.dumps(receipt_basis, sort_keys=True).encode()).hexdigest()
     return {
@@ -198,6 +195,10 @@ def run(grid: Grid = Grid(), cfg: RunConfig = RunConfig()) -> tuple[np.ndarray, 
     t = 0.0
     while t < cfg.seconds:
         dt = min(stable_dt(U, solid, grid, cfg.cfl), cfg.seconds - t)
+        if not np.isfinite(dt) or dt <= 0.0:
+            raise FloatingPointError("non-finite/invalid CFL step")
         U = step(U, solid, grid, dt)
+        if not np.isfinite(U).all():
+            raise FloatingPointError("non-finite shallow-water state")
         t += dt
     return U, solid, diagnostics(U, U0, solid, grid, cfg)
